@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tems"
+version = "0.1.0"
+description = "Topological Evolving Memory System — self-evolving agent memory with FTS5+BM25, topological health scoring, and hybrid retrieval"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-cov"]
+
+[project.scripts]
+tems = "tems.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tems"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
