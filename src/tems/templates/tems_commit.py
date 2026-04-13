@@ -1,5 +1,5 @@
 """
-TEMS 규칙 등록 CLI — 범용 템플릿
+TEMS 규칙 등록 CLI — tems 패키지 API 사용
 """
 
 import argparse
@@ -10,6 +10,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from tems.fts5_memory import MemoryDB
 
 
 def find_agent_root(start: Path) -> Path:
@@ -29,55 +30,84 @@ DB_PATH = str(AGENT_ROOT / "memory" / "error_logs.db")
 QMD_RULES_DIR = AGENT_ROOT / "memory" / "qmd_rules"
 
 
+def _check_duplicates(db: MemoryDB, category: str, rule: str, triggers: str) -> dict | None:
+    """중복/유사 규칙 검사. 문제 있으면 error dict 반환, 없으면 None."""
+    with db._conn() as conn:
+        row = conn.execute(
+            "SELECT id, correction_rule FROM memory_logs WHERE correction_rule = ?", (rule,)
+        ).fetchone()
+        if row:
+            return {"ok": False, "error": f"Duplicate rule (id={row['id']}): {row['correction_rule'][:60]}..."}
+
+        rows = conn.execute(
+            "SELECT id, keyword_trigger, correction_rule FROM memory_logs WHERE category = ?", (category,)
+        ).fetchall()
+        new_kw = set(triggers.split())
+        for r in rows:
+            existing_kw = set(r["keyword_trigger"].split())
+            if existing_kw and new_kw:
+                overlap = len(existing_kw & new_kw) / max(len(existing_kw), len(new_kw))
+                if overlap > 0.8:
+                    return {"ok": False, "error": f"Similar rule exists (id={r['id']}, overlap={overlap:.0%}): {r['correction_rule'][:60]}..."}
+    return None
+
+
 def commit_rule(category: str, rule: str, triggers: str, tags: str, source: str = "agent-auto") -> dict:
     if not os.path.exists(DB_PATH):
         return {"ok": False, "error": f"DB not found: {DB_PATH}"}
 
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    now = datetime.now().isoformat()
+    db = MemoryDB(db_path=DB_PATH)
 
-    cur.execute("SELECT id, correction_rule FROM memory_logs WHERE correction_rule = ?", (rule,))
-    existing = cur.fetchone()
-    if existing:
-        conn.close()
-        return {"ok": False, "error": f"Duplicate rule (id={existing[0]}): {existing[1][:60]}..."}
+    # 중복 검사
+    dup = _check_duplicates(db, category, rule, triggers)
+    if dup:
+        return dup
 
-    cur.execute("SELECT id, keyword_trigger, correction_rule FROM memory_logs WHERE category = ?", (category,))
-    for row in cur.fetchall():
-        existing_kw = set(row[1].split())
-        new_kw = set(triggers.split())
-        if existing_kw and new_kw:
-            overlap = len(existing_kw & new_kw) / max(len(existing_kw), len(new_kw))
-            if overlap > 0.8:
-                conn.close()
-                return {"ok": False, "error": f"Similar rule exists (id={row[0]}, overlap={overlap:.0%}): {row[2][:60]}..."}
+    # MemoryDB API로 커밋
+    full_tags = [t.strip() for t in tags.split(",") if t.strip()] + [f"source:{source}"]
 
-    # context_tags에 source 정보를 포함
-    full_tags = f"{tags},source:{source}" if tags else f"source:{source}"
+    if category == "TCL":
+        rule_id = db.commit_tcl(
+            original_instruction=rule,
+            topological_rule=rule,
+            keyword_trigger=triggers,
+            context_tags=full_tags,
+        )
+    elif category == "TGL":
+        rule_id = db.commit_tgl(
+            error_description=rule,
+            topological_case=rule,
+            guard_rule=rule,
+            keyword_trigger=triggers,
+            context_tags=full_tags,
+        )
+    else:
+        rule_id = db.commit_memory(
+            context_tags=full_tags,
+            action_taken="auto-registered",
+            result="pending",
+            correction_rule=rule,
+            keyword_trigger=triggers,
+            category=category,
+        )
 
-    cur.execute("""
-        INSERT INTO memory_logs (timestamp, category, context_tags, keyword_trigger, correction_rule, action_taken, result, severity, summary)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (now, category, full_tags, triggers, rule, "auto-registered", "pending", "info", rule[:120]))
-    rule_id = cur.lastrowid
+    # rule_health 초기화
+    with db._conn() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO rule_health (rule_id, ths_score, status) VALUES (?, 0.5, 'warm')",
+                (rule_id,),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            pass  # 이미 존재
 
-    cur.execute("""
-        INSERT INTO rule_health (rule_id, ths_score, status)
-        VALUES (?, 0.5, 'warm')
-    """, (rule_id,))
-
-    conn.commit()
-    conn.close()
-
-    # QMD 자동 동기화 — 새 규칙 파일 생성
+    # QMD 자동 동기화
     try:
         from tems.tems_engine import sync_single_rule_to_qmd
-        from tems.fts5_memory import MemoryDB
-        db = MemoryDB(db_path=DB_PATH)
         sync_single_rule_to_qmd(rule_id, db=db, qmd_rules_dir=QMD_RULES_DIR)
     except Exception:
-        pass  # QMD 동기화 실패 시 규칙 등록은 유지
+        pass
 
     return {"ok": True, "rule_id": rule_id, "category": category, "rule": rule[:80]}
 

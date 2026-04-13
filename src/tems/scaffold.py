@@ -16,16 +16,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-_DEFAULT_REGISTRY = Path("E:/AgentInterface/tems_registry.json")
-
-
 def get_registry_path() -> Path | None:
-    """Registry path resolution: env var → default → None."""
+    """Registry path resolution: TEMS_REGISTRY_PATH env var → None."""
     env = os.environ.get("TEMS_REGISTRY_PATH")
     if env:
         return Path(env)
-    if _DEFAULT_REGISTRY.exists():
-        return _DEFAULT_REGISTRY
     return None
 
 
