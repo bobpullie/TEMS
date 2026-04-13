@@ -12,3 +12,13 @@ def test_rebuild_imports():
     from tems.rebuild_from_qmd import parse_qmd_rule, rebuild
     assert parse_qmd_rule is not None
     assert rebuild is not None
+
+
+def test_public_api():
+    """All public API symbols importable from tems package."""
+    from tems import (
+        MemoryDB, HybridRetriever, HealthScorer,
+        RuleGraph, EnhancedPreflight, get_registry_path,
+        __version__,
+    )
+    assert __version__ == "0.1.0"
