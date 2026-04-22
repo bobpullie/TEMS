@@ -134,28 +134,70 @@ BM25_WEIGHT = 0.6
 THS_WEIGHT = 0.4
 
 
-def get_ths_scores() -> dict[int, tuple[float, str]]:
-    """rule_health 테이블에서 (rule_id → (ths_score, status)) 매핑 로드"""
+def get_rule_health() -> dict[int, dict]:
+    """rule_health 테이블에서 규칙별 건강 지표 로드.
+
+    반환 dict 키: ths_score, status, violation_count, compliance_count, fire_count
+    Layer 1 강화 (2026-04-22): violation_count 를 preflight 출력에 노출하여
+    LLM 이 반복 위반 규칙을 인지하도록 함.
+
+    구 DB 스키마 호환: violation/compliance/fire 컬럼 없으면 0 반환.
+    """
     import sqlite3
     try:
         conn = sqlite3.connect(str(DB_PATH))
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT rule_id, ths_score, status FROM rule_health").fetchall()
+        # 컬럼 존재 여부 확인 — Phase 2A/3 이전 DB 호환
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(rule_health)").fetchall()}
+        select_fields = ["rule_id", "ths_score", "status"]
+        for opt in ("violation_count", "compliance_count", "fire_count"):
+            if opt in cols:
+                select_fields.append(opt)
+        rows = conn.execute(f"SELECT {', '.join(select_fields)} FROM rule_health").fetchall()
         conn.close()
-        return {r["rule_id"]: (r["ths_score"] or 0.5, r["status"] or "warm") for r in rows}
+        result = {}
+        for r in rows:
+            entry = {
+                "ths_score": r["ths_score"] or 0.5,
+                "status": r["status"] or "warm",
+                "violation_count": (r["violation_count"] if "violation_count" in cols else 0) or 0,
+                "compliance_count": (r["compliance_count"] if "compliance_count" in cols else 0) or 0,
+                "fire_count": (r["fire_count"] if "fire_count" in cols else 0) or 0,
+            }
+            result[r["rule_id"]] = entry
+        return result
     except Exception:
         return {}
 
 
-def rank_by_ths(hits: list[dict], ths_map: dict[int, tuple[float, str]]) -> list[dict]:
+def get_ths_scores() -> dict[int, tuple[float, str]]:
+    """Backward-compat shim — get_rule_health() 의 축소 반환."""
+    health = get_rule_health()
+    return {rid: (h["ths_score"], h["status"]) for rid, h in health.items()}
+
+
+def rank_by_ths(hits: list[dict], health_map) -> list[dict]:
     """BM25 순위(리스트 순서)와 THS 점수를 결합하여 재정렬.
 
     archive 상태 규칙은 제외.
+    Layer 1 강화: health_map 은 get_rule_health() 의 dict-of-dict.
+    backward-compat 으로 기존 (ths_score, status) tuple map 도 허용.
     """
     scored = []
     for rank, hit in enumerate(hits):
         rid = hit.get("id")
-        ths_score, status = ths_map.get(rid, (0.5, "warm"))
+        entry = health_map.get(rid)
+        if entry is None:
+            ths_score, status = 0.5, "warm"
+            violation_count, compliance_count = 0, 0
+        elif isinstance(entry, dict):
+            ths_score = entry.get("ths_score", 0.5)
+            status = entry.get("status", "warm")
+            violation_count = entry.get("violation_count", 0)
+            compliance_count = entry.get("compliance_count", 0)
+        else:
+            ths_score, status = entry
+            violation_count, compliance_count = 0, 0
 
         # archive 상태 규칙은 주입에서 제외
         if status == "archive":
@@ -167,10 +209,25 @@ def rank_by_ths(hits: list[dict], ths_map: dict[int, tuple[float, str]]) -> list
         hit["_final_score"] = final_score
         hit["_ths"] = ths_score
         hit["_status"] = status
+        hit["_violation_count"] = violation_count
+        hit["_compliance_count"] = compliance_count
         scored.append(hit)
 
     scored.sort(key=lambda x: x["_final_score"], reverse=True)
     return scored
+
+
+def _format_health_annot(hit: dict) -> str:
+    """rule 의 violation/compliance 지표를 압축 주석으로 포맷.
+
+    Layer 1 강화 (2026-04-22): 반복 위반 규칙을 LLM 이 즉시 인지하도록
+    각 규칙 옆에 (v:N c:M) 형태로 건강 지표를 붙인다.
+    """
+    v = hit.get("_violation_count", 0)
+    c = hit.get("_compliance_count", 0)
+    if v == 0 and c == 0:
+        return ""
+    return f" (v:{v} c:{c})"
 
 
 def format_rules(preflight_result: dict, compact: bool = True) -> str:
@@ -179,20 +236,24 @@ def format_rules(preflight_result: dict, compact: bool = True) -> str:
     compact=True: summary만 출력 (컨텍스트 절약)
     compact=False: correction_rule 전문 출력 (기존 방식)
 
-    v2026.3.29: THS 가중치 적용 + 컨텍스트 버짓 도입 (관리군)
+    Layer 1 강화 (2026-04-22):
+      - TGL 섹션을 "필수 준수" 헤더로 승격
+      - 각 규칙에 violation/compliance 카운트 주석
+      - 말미에 규칙 준수 명시 directive 삽입
     """
-    # THS 점수 로드
-    ths_map = get_ths_scores()
+    # 규칙 건강 지표 로드 (Layer 1: violation_count 포함)
+    health_map = get_rule_health()
 
-    # THS 기반 재정렬 + archive 제외
-    tcl_hits = rank_by_ths(preflight_result.get("tcl_hits", []), ths_map)[:MAX_TCL]
-    tgl_hits = rank_by_ths(preflight_result.get("tgl_hits", []), ths_map)[:MAX_TGL]
-    cascade_hits = rank_by_ths(preflight_result.get("cascade_hits", []), ths_map)[:MAX_CASCADE]
+    # 재정렬 + archive 제외
+    tcl_hits = rank_by_ths(preflight_result.get("tcl_hits", []), health_map)[:MAX_TCL]
+    tgl_hits = rank_by_ths(preflight_result.get("tgl_hits", []), health_map)[:MAX_TGL]
+    cascade_hits = rank_by_ths(preflight_result.get("cascade_hits", []), health_map)[:MAX_CASCADE]
     predictions = preflight_result.get("predictions", [])[:MAX_PREDICT]
 
     if not tcl_hits and not tgl_hits and not cascade_hits and not predictions:
         return ""
 
+    tgl_fired: list[int] = []
     lines = []
     lines.append("<preflight-memory-check>")
 
@@ -200,25 +261,47 @@ def format_rules(preflight_result: dict, compact: bool = True) -> str:
         lines.append("[TCL]")
         for r in tcl_hits:
             text = r.get("summary") or r.get("correction_rule", "") if compact else r.get("correction_rule", "")
-            lines.append(f"  #{r.get('id', '?')}: {text}")
+            rid = r.get('id', '?')
+            annot = _format_health_annot(r)
+            lines.append(f"  #{rid}{annot}: {text}")
 
+    # Layer 1 강화: TGL 헤더에 필수 준수 마커. 풀텍스트 유지.
     if tgl_hits:
-        lines.append("[TGL]")
+        lines.append("[TGL] 필수 준수 — 위반 시 rule_health.violation_count 자동 증가")
         for r in tgl_hits:
-            text = r.get("summary") or r.get("correction_rule", "") if compact else r.get("correction_rule", "")
-            lines.append(f"  #{r.get('id', '?')}: {text}")
+            text = r.get("correction_rule", "") or r.get("summary", "")
+            rid = r.get('id', '?')
+            annot = _format_health_annot(r)
+            lines.append(f"  #{rid}{annot}: {text}")
+            if isinstance(rid, int):
+                tgl_fired.append(rid)
 
     if cascade_hits:
         lines.append("[CASCADE]")
         for r in cascade_hits:
-            text = r.get("summary") or r.get("correction_rule", "") if compact else r.get("correction_rule", "")
-            lines.append(f"  #{r.get('id', '?')}: [{r.get('category', '?')}] {text}")
+            cat = r.get('category', '?')
+            if cat == "TGL":
+                text = r.get("correction_rule", "") or r.get("summary", "")
+            else:
+                text = r.get("summary") or r.get("correction_rule", "") if compact else r.get("correction_rule", "")
+            rid = r.get('id', '?')
+            annot = _format_health_annot(r)
+            lines.append(f"  #{rid}{annot}: [{cat}] {text}")
+            if isinstance(rid, int) and cat == "TGL":
+                tgl_fired.append(rid)
 
     if predictions:
         lines.append("[PREDICT]")
         for p in predictions:
             conf = p.get("confidence", 0)
             lines.append(f"  ({conf:.0%}) {p.get('predicted_error', '')[:40]}")
+
+    # Layer 1 강화: TGL 주입 시 명시적 준수 선언 directive
+    if tgl_fired:
+        ids_str = ", ".join(f"#{rid}" for rid in tgl_fired)
+        lines.append(
+            f"→ 위 TGL 중 해당되는 규칙을 응답에 명시하세요. 예: \"TGL #{tgl_fired[0]} 에 따라 X 대신 Y 사용\". 주입된 TGL: {ids_str}"
+        )
 
     lines.append("</preflight-memory-check>")
     return "\n".join(lines)
