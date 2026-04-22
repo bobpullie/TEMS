@@ -307,18 +307,45 @@ def format_rules(preflight_result: dict, compact: bool = True) -> str:
     return "\n".join(lines)
 
 
-def detect_project_scope(agent_id: str) -> list[str]:
-    """tems_registry.json에서 에이전트의 프로젝트 조회"""
+def detect_project_scope(agent_id: str, cwd: str = "") -> list[str]:
+    """에이전트의 허용 프로젝트 스코프 감지.
+
+    우선순위:
+    1. Registry (TEMS_REGISTRY_PATH) 가 설정되어 있고 agent 가 등록되어 있으면
+       해당 agent 의 projects 를 사용.
+    2. 그 외 (solo agent) — cwd 경로에서 프로젝트 키워드를 휴리스틱 추출.
+       예: cwd = E:/DnT/DnT_ArtGoon → scopes 에 project:dnt, project:artgoon 추가.
+
+    항상 포함되는 기본 scope: project:meta, project:all, "" (태그 없음)
+    """
     scopes = ["project:meta", "project:all", ""]
-    try:
-        if REGISTRY_PATH is None:
-            return scopes
-        registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
-        projects = registry.get("agents", {}).get(agent_id, {}).get("projects", [])
-        for p in projects:
-            scopes.append(f"project:{p.lower()}")
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass  # 레지스트리 없으면 기본 스코프만 사용
+
+    # 1) Registry 기반 조회
+    if REGISTRY_PATH is not None and REGISTRY_PATH.exists():
+        try:
+            registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+            projects = registry.get("agents", {}).get(agent_id, {}).get("projects", [])
+            for p in projects:
+                scopes.append(f"project:{p.lower()}")
+            if projects:
+                # registry 에 유효 정보가 있으면 그것만으로 종결
+                return scopes
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass  # registry 읽기 실패 → cwd fallback 으로
+
+    # 2) cwd fallback — 경로 세그먼트에서 프로젝트 키워드 추출
+    cwd_norm = (cwd or "").lower().replace("\\", "/")
+    if cwd_norm:
+        path_parts = [p for p in cwd_norm.split("/") if p]
+        # 최근 3 경로 세그먼트 + 각각의 언더스코어 분리
+        for part in path_parts[-3:]:
+            for sub in part.split("_"):
+                if sub and sub.isalnum() and len(sub) > 1:
+                    scopes.append(f"project:{sub}")
+    # agent_id 자체도 scope 후보로 추가 (예: agent_id=artgoon → project:artgoon)
+    if agent_id:
+        scopes.append(f"project:{agent_id.lower()}")
+
     return scopes
 
 
@@ -333,16 +360,17 @@ def filter_by_project(hits: list[dict], allowed_scopes: list[str]) -> list[dict]
         if rule.startswith("/") and "스킬로" in rule:
             continue
 
-        # project 태그 추출
+        # project 태그 추출 (case-insensitive 비교를 위해 소문자화)
         project_tag = ""
         for part in tags.split(","):
             part = part.strip()
-            if part.startswith("project:"):
-                project_tag = part
+            if part.lower().startswith("project:"):
+                project_tag = part.lower()
                 break
 
-        # 허용된 스코프에 포함되면 통과
-        if project_tag in allowed_scopes:
+        # 허용된 스코프에 포함되면 통과 (allowed_scopes 는 detect_project_scope 가 소문자화)
+        allowed_lower = [s.lower() for s in allowed_scopes]
+        if project_tag in allowed_lower:
             filtered.append(hit)
 
     return filtered
@@ -388,7 +416,7 @@ def main():
             sys.exit(0)
 
         # 프로젝트 스코프 감지 (v2026.3.29 관리군)
-        allowed_scopes = detect_project_scope(AGENT_ID)
+        allowed_scopes = detect_project_scope(AGENT_ID, cwd)
 
         # 키워드 추출
         keywords = extract_keywords(prompt)

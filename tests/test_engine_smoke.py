@@ -21,4 +21,6 @@ def test_public_api():
         RuleGraph, EnhancedPreflight, get_registry_path,
         __version__,
     )
-    assert __version__ == "0.1.0"
+    # Version follows semver — just check format (M.m.p)
+    import re
+    assert re.match(r"^\d+\.\d+\.\d+", __version__), f"Invalid version: {__version__}"

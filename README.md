@@ -311,6 +311,33 @@ final_score = 0.6 * BM25_rank_score + 0.4 * THS_score
 
 ---
 
+## Advanced: Dense Fallback (QMD / CUDA, 선택)
+
+BM25 키워드 매칭은 어휘 변형(동의어·활용형)에 약하다. 의미 기반 보강이 필요하면 Dense vector fallback 을 활성화할 수 있다.
+
+**패키지 코드는 이미 지원:**
+- `tems.tems_engine.HybridRetriever` — BM25 1차 + dense 2차 rank fusion
+- `templates/preflight_hook.py` 는 `HybridRetriever` 를 import 해 두었고, BM25 hit 이 빈약할 때(`< 2`) 폴백
+
+**활성 조건:**
+1. QMD (Quantized Metric Dense) 백엔드 설치 — CUDA 환경 + `qmd-embed` 스킬 / CLI 필요 (별도 제공)
+2. 해당 에이전트용 QMD 컬렉션 생성 — 규칙을 벡터로 임베딩
+3. 템플릿 preflight 에서 `SEMANTIC_FALLBACK_ENABLED = True` (기본 미선언 — 필요 시 에이전트별 커스터마이징)
+
+**사용 시 장점:**
+- `ComfyUI 워크플로우 검증` 프롬프트가 `comfy workflow validate` 규칙과 매칭 — 어휘 변형에 robust
+- 한국어·영어 혼용 프롬프트의 semantic 유사도 포착
+- BM25 이 놓치는 의미 매칭 구원
+
+**사용하지 않아도 되는 경우:**
+- 규칙 수 < 50 이고 키워드가 잘 정렬돼 있으면 BM25 만으로 충분
+- CUDA 환경 없는 배포처 (서버·CI 등)
+- 초기 온보딩 단계 — BM25 먼저 검증 후 필요 시 dense 추가
+
+**기본값은 꺼진 상태** — BM25 only 로 plug-and-play 동작. QMD 사용은 완전 선택 사항.
+
+---
+
 ## 규칙 진화 (Self-Evolution)
 
 ### Trigger Counting
@@ -431,7 +458,8 @@ tail -20 memory/compliance_events.jsonl | jq .
 | 버전 | Phase | 내용 |
 |------|-------|------|
 | 0.1.0 | Phase 2 | self-contained retrieval + 게이트 A~E + 패키지화 + scaffold CLI |
-| **0.2.0** | **Phase 3 + Layer 1 강화** | tool_gate_hook (deny), compliance_tracker, decay, pattern_detector, tool_failure, retrospective, memory_bridge, sdc_commit 템플릿 추가. preflight 에 violation_count 노출 + 필수 준수 헤더. scaffold 가 6개 hook 이벤트 등록. Phase 2→3 in-place DB 마이그레이션. |
+| 0.2.0 | Phase 3 + Layer 1 강화 | tool_gate_hook (deny), compliance_tracker, decay, pattern_detector, tool_failure, retrospective, memory_bridge, sdc_commit 템플릿 추가. preflight 에 violation_count 노출 + 필수 준수 헤더. scaffold 가 6개 hook 이벤트 등록. Phase 2→3 in-place DB 마이그레이션. |
+| **0.2.1** | **Patch** | **Template preflight 의 `detect_project_scope` 가 Registry 미설정 시 cwd fallback 으로 `project:X` 태그 규칙 매칭 가능. `__version__` 상수 동기화. QMD Dense Fallback README 섹션 추가.** |
 
 ---
 
