@@ -63,12 +63,46 @@ def create_directories(cwd: Path) -> list[str]:
     return actions
 
 
+# Phase 3 rule_health 추가 컬럼 (Phase 2 → Phase 3 마이그레이션 대상).
+# 기존 DB 에 누락 시 ALTER TABLE ADD COLUMN 으로 보충.
+_RULE_HEALTH_PHASE3_COLUMNS = (
+    ("fire_count", "INTEGER DEFAULT 0"),
+    ("last_fired", "TEXT"),
+    ("compliance_count", "INTEGER DEFAULT 0"),
+    ("violation_count", "INTEGER DEFAULT 0"),
+    ("created_at", "TEXT"),
+    ("classification", "TEXT"),
+    ("abstraction_level", "TEXT"),
+    ("needs_review", "INTEGER DEFAULT 0"),
+)
+
+
+def _migrate_rule_health(db_path: str) -> list[str]:
+    """Phase 2 → Phase 3 in-place 컬럼 마이그레이션. 기존 데이터 보존."""
+    conn = sqlite3.connect(db_path)
+    try:
+        existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(rule_health)").fetchall()}
+    except sqlite3.OperationalError:
+        # rule_health 테이블 자체가 없는 경우 — 호출자가 _create_tables 로 처리
+        conn.close()
+        return []
+    added = []
+    for col, ddl in _RULE_HEALTH_PHASE3_COLUMNS:
+        if col not in existing_cols:
+            conn.execute(f"ALTER TABLE rule_health ADD COLUMN {col} {ddl}")
+            added.append(col)
+    if added:
+        conn.commit()
+    conn.close()
+    return added
+
+
 def create_database(cwd: Path, force: bool) -> str:
-    """Step 3: error_logs.db 전체 스키마 생성"""
+    """Step 3: error_logs.db 전체 스키마 생성 (Phase 2 → Phase 3 마이그레이션 포함)."""
     db_path = cwd / "memory" / "error_logs.db"
 
     if db_path.exists() and not force:
-        # 스키마 검증만 수행
+        # 스키마 검증 — 누락 테이블 + Phase 3 rule_health 컬럼 보충
         conn = sqlite3.connect(str(db_path))
         tables = [r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
@@ -78,9 +112,15 @@ def create_database(cwd: Path, force: bool) -> str:
                      "rule_edges", "co_activations", "tgl_sequences", "trigger_misses", "rule_versions"}
         missing = required - set(tables)
         if missing:
-            # 누락 테이블만 추가 생성
             _create_tables(str(db_path), only_missing=missing)
+        # Phase 3 컬럼 마이그레이션 — rule_health 가 존재하는 경우
+        added_cols = _migrate_rule_health(str(db_path))
+        if missing and added_cols:
+            return "db_schema_updated_and_migrated"
+        if missing:
             return "db_schema_updated"
+        if added_cols:
+            return "db_phase3_columns_added"
         return "db_exists"
 
     _create_tables(str(db_path))
@@ -120,6 +160,14 @@ def _create_tables(db_path: str, only_missing: set = None):
                 status_changed_at TEXT DEFAULT (datetime('now')),
                 ths_score REAL DEFAULT 0.5,
                 ths_updated_at TEXT DEFAULT (datetime('now')),
+                fire_count INTEGER DEFAULT 0,
+                last_fired TEXT,
+                compliance_count INTEGER DEFAULT 0,
+                violation_count INTEGER DEFAULT 0,
+                created_at TEXT,
+                classification TEXT,
+                abstraction_level TEXT,
+                needs_review INTEGER DEFAULT 0,
                 FOREIGN KEY (rule_id) REFERENCES memory_logs(id)
             )
         """,
@@ -205,13 +253,13 @@ def _create_tables(db_path: str, only_missing: set = None):
         if only_missing is None or name in only_missing:
             conn.execute(ddl)
 
-    # FTS5 가상 테이블 (memory_logs 기반)
+    # FTS5 가상 테이블 (memory_logs 기반) — summary 컬럼 포함 (Phase 2A+)
     if only_missing is None or "memory_fts" in only_missing:
         conn.execute("DROP TABLE IF EXISTS memory_fts")
         conn.execute("""
             CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
                 context_tags, keyword_trigger, action_taken, result,
-                correction_rule, category,
+                correction_rule, category, summary,
                 content=memory_logs, content_rowid=id,
                 tokenize='unicode61'
             )
@@ -219,22 +267,22 @@ def _create_tables(db_path: str, only_missing: set = None):
         # 동기화 트리거
         conn.execute("""
             CREATE TRIGGER IF NOT EXISTS memory_ai AFTER INSERT ON memory_logs BEGIN
-                INSERT INTO memory_fts(rowid, context_tags, keyword_trigger, action_taken, result, correction_rule, category)
-                VALUES (new.id, new.context_tags, new.keyword_trigger, new.action_taken, new.result, new.correction_rule, new.category);
+                INSERT INTO memory_fts(rowid, context_tags, keyword_trigger, action_taken, result, correction_rule, category, summary)
+                VALUES (new.id, new.context_tags, new.keyword_trigger, new.action_taken, new.result, new.correction_rule, new.category, new.summary);
             END
         """)
         conn.execute("""
             CREATE TRIGGER IF NOT EXISTS memory_ad AFTER DELETE ON memory_logs BEGIN
-                INSERT INTO memory_fts(memory_fts, rowid, context_tags, keyword_trigger, action_taken, result, correction_rule, category)
-                VALUES ('delete', old.id, old.context_tags, old.keyword_trigger, old.action_taken, old.result, old.correction_rule, old.category);
+                INSERT INTO memory_fts(memory_fts, rowid, context_tags, keyword_trigger, action_taken, result, correction_rule, category, summary)
+                VALUES ('delete', old.id, old.context_tags, old.keyword_trigger, old.action_taken, old.result, old.correction_rule, old.category, old.summary);
             END
         """)
         conn.execute("""
             CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory_logs BEGIN
-                INSERT INTO memory_fts(memory_fts, rowid, context_tags, keyword_trigger, action_taken, result, correction_rule, category)
-                VALUES ('delete', old.id, old.context_tags, old.keyword_trigger, old.action_taken, old.result, old.correction_rule, old.category);
-                INSERT INTO memory_fts(rowid, context_tags, keyword_trigger, action_taken, result, correction_rule, category)
-                VALUES (new.id, new.context_tags, new.keyword_trigger, new.action_taken, new.result, new.correction_rule, new.category);
+                INSERT INTO memory_fts(memory_fts, rowid, context_tags, keyword_trigger, action_taken, result, correction_rule, category, summary)
+                VALUES ('delete', old.id, old.context_tags, old.keyword_trigger, old.action_taken, old.result, old.correction_rule, old.category, old.summary);
+                INSERT INTO memory_fts(rowid, context_tags, keyword_trigger, action_taken, result, correction_rule, category, summary)
+                VALUES (new.id, new.context_tags, new.keyword_trigger, new.action_taken, new.result, new.correction_rule, new.category, new.summary);
             END
         """)
 
@@ -266,11 +314,33 @@ def install_gitignore(cwd: Path, force: bool) -> str:
         return "gitignore_created"
 
 
+# Phase 2 진입점 템플릿 (기존)
+_PHASE2_TEMPLATES = ("preflight_hook.py", "tems_commit.py")
+
+# Phase 3 Enforcement 레이어 — tool_gate_hook (deny), compliance_tracker (측정),
+# tool_failure (패턴), retrospective (세션 종료), pattern_detector (자동 등록),
+# memory_bridge (파일 변경 학습), decay (건강 진화), sdc_commit (위임 계약 CLI).
+_PHASE3_TEMPLATES = (
+    "tool_gate_hook.py",
+    "compliance_tracker.py",
+    "tool_failure_hook.py",
+    "retrospective_hook.py",
+    "pattern_detector.py",
+    "memory_bridge.py",
+    "decay.py",
+    "sdc_commit.py",
+)
+
+
 def copy_templates(cwd: Path, force: bool) -> list[str]:
-    """Step 4: 진입점 템플릿 복사"""
+    """Step 4: 진입점 템플릿 복사 (Phase 2 + Phase 3 포함)."""
     actions = []
-    for filename in ("preflight_hook.py", "tems_commit.py"):
+    for filename in _PHASE2_TEMPLATES + _PHASE3_TEMPLATES:
         src = _get_template_path(filename)
+        if not src.exists():
+            # 템플릿이 패키지에 포함되지 않은 경우 (구버전 호환)
+            actions.append(f"{filename}_missing_in_package")
+            continue
         dst = cwd / "memory" / filename
         if dst.exists() and not force:
             actions.append(f"{filename}_exists")
@@ -280,34 +350,80 @@ def copy_templates(cwd: Path, force: bool) -> list[str]:
     return actions
 
 
-def register_hook(cwd: Path) -> str:
-    """Step 5: .claude/settings.local.json에 UserPromptSubmit hook 등록"""
+# Phase 3 hook event → script 매핑. matcher 는 빈 문자열로 전체 도구 대상.
+# - UserPromptSubmit: preflight 규칙 주입 (Phase 2)
+# - PreToolUse: TGL-T deny/warning (Phase 3)
+# - PostToolUse(ALL): compliance 측정 (Phase 3)
+# - PostToolUse(Bash): 실패 시그니처 탐지 (Phase 3)
+# - PostToolUse(Write|Edit): 파일 변경 학습 (Phase 2/3)
+# - Stop: 세션 종료 교훈 추출 (Phase 3)
+_HOOK_PLAN = (
+    ("UserPromptSubmit", "", "preflight_hook.py"),
+    ("PreToolUse", "", "tool_gate_hook.py"),
+    ("PostToolUse", "", "compliance_tracker.py"),
+    ("PostToolUse", "Bash", "tool_failure_hook.py"),
+    ("PostToolUse", "Write|Edit", "memory_bridge.py"),
+    ("Stop", "", "retrospective_hook.py"),
+)
+
+
+def register_hook(cwd: Path) -> list[str]:
+    """Step 5: .claude/settings.local.json 에 TEMS hook 등록 (Phase 2 + Phase 3).
+
+    멱등 — 이미 등록된 동일 script 는 경로만 갱신.
+    matcher 가 있는 event 는 같은 matcher 안의 동일 script 를 중복 등록하지 않음.
+    """
     settings_path = cwd / ".claude" / "settings.local.json"
-
-    hook_entry = {
-        "type": "command",
-        "command": f'python "{cwd}/memory/preflight_hook.py"'
-    }
-
     if settings_path.exists():
         settings = json.loads(settings_path.read_text(encoding="utf-8"))
     else:
         settings = {}
-
     hooks = settings.setdefault("hooks", {})
-    submit_hooks = hooks.setdefault("UserPromptSubmit", [])
 
-    # 이미 등록된 preflight hook이 있는지 확인
-    for existing in submit_hooks:
-        if "preflight_hook.py" in existing.get("command", ""):
-            # 경로 갱신
-            existing["command"] = hook_entry["command"]
-            settings_path.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
-            return "hook_updated"
+    actions: list[str] = []
 
-    submit_hooks.append(hook_entry)
+    for event, matcher, script in _HOOK_PLAN:
+        # 해당 event 에 해당 script 가 포함된 템플릿이 실제 복사되었는지 확인
+        template_path = _get_template_path(script)
+        if not template_path.exists():
+            # 패키지에 템플릿이 없는 경우 (구버전 호환) — hook 등록 건너뜀
+            actions.append(f"{event}:{script}_skipped_missing_template")
+            continue
+
+        new_command = f'python "{cwd}/memory/{script}"'
+        event_entries = hooks.setdefault(event, [])
+
+        # matcher 가 같은 entry 를 찾거나 새로 생성
+        target_entry = None
+        for entry in event_entries:
+            if entry.get("matcher", "") == matcher:
+                target_entry = entry
+                break
+        if target_entry is None:
+            target_entry = {"matcher": matcher, "hooks": []}
+            event_entries.append(target_entry)
+
+        inner_hooks = target_entry.setdefault("hooks", [])
+
+        # 이미 같은 script 가 등록되어 있는지 확인 (basename 매칭)
+        existing = None
+        for h in inner_hooks:
+            if script in h.get("command", ""):
+                existing = h
+                break
+
+        if existing is not None:
+            if existing.get("command") != new_command:
+                existing["command"] = new_command
+                actions.append(f"{event}:{script}_updated")
+            else:
+                actions.append(f"{event}:{script}_exists")
+        else:
+            inner_hooks.append({"type": "command", "command": new_command})
+            actions.append(f"{event}:{script}_registered")
+
     settings_path.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
-    return "hook_registered"
+    return actions
 
 
 def load_registry(registry_path: Path = None) -> dict:
@@ -506,7 +622,7 @@ def restore_agent(agent_id: str, registry_path: Path = None) -> dict:
     actions.extend(copy_templates(cwd, force=False))
 
     # 6. Hook — 항상 재등록 (경로 갱신 보장)
-    actions.append(register_hook(cwd))
+    actions.extend(register_hook(cwd))
 
     # 7. Registry last_verified 갱신
     agent["last_verified"] = now
@@ -561,7 +677,7 @@ def main():
             actions.append(create_database(cwd, args.force))
             actions.append(install_gitignore(cwd, args.force))
             actions.extend(copy_templates(cwd, args.force))
-            actions.append(register_hook(cwd))
+            actions.extend(register_hook(cwd))
             db_path = str(cwd / "memory" / "error_logs.db")
             actions.append(update_registry(args.agent_id, args.agent_name, args.project, db_path))
             result = {"ok": True, "agent_id": args.agent_id, "actions": actions}
