@@ -12,6 +12,7 @@ from pathlib import Path
 
 from tems.fts5_memory import MemoryDB
 from tems.tems_engine import EnhancedPreflight, RuleGraph, HybridRetriever
+from tems.korean_utils import strip_korean_suffix
 
 
 def find_agent_root(start: Path) -> Path:
@@ -32,49 +33,6 @@ DB_PATH = AGENT_ROOT / "memory" / "error_logs.db"
 import os
 _reg_env = os.environ.get("TEMS_REGISTRY_PATH")
 REGISTRY_PATH = Path(_reg_env) if _reg_env else None
-
-
-def strip_korean_suffix(word: str) -> str:
-    """한국어 단어에서 조사/어미를 제거하여 어간을 추출.
-
-    완벽한 형태소 분석은 아니지만, FTS5 prefix 매칭과 결합하여
-    '퇴근할게요' → '퇴근', '마무리합시다' → '마무리' 등을 처리합니다.
-    """
-    # 흔한 어미/조사 패턴 (긴 것부터 매칭)
-    suffixes = [
-        # 종결어미
-        "할게요", "합시다", "합니다", "했습니다", "하겠습니다",
-        "할까요", "해주세요", "해볼게요", "해봅시다",
-        "입니다", "습니다", "됩니다", "겠습니다",
-        "할게", "할까", "하자", "해요", "해줘", "하죠",
-        "인데요", "인데", "이에요", "이야",
-        # 연결어미
-        "하면서", "하면", "하고", "해서", "하니까", "하지만",
-        "인데", "이라", "이면", "이고",
-        # 관형형
-        "하는", "했던", "할",
-        # 조사
-        "에서는", "에서", "에는", "에게", "까지", "부터",
-        "으로", "에도", "이나", "이란",
-        "에", "를", "을", "는", "은", "이", "가", "의", "와", "과",
-        "도", "만", "로",
-        # 보조용언
-        "했어요", "했어", "했다", "해야",
-        "됐어요", "됐어", "됐다",
-        "시키", "하기", "되기",
-        # 기타 활용형
-        "할게요", "할까요", "합시다",
-        "했는데", "하는데", "되는데",
-        "거든요", "거든",
-        "잖아요", "잖아",
-        "네요", "군요",
-    ]
-
-    for suffix in suffixes:
-        if word.endswith(suffix) and len(word) > len(suffix) + 1:
-            return word[: -len(suffix)]
-
-    return word
 
 
 def extract_keywords(prompt: str, max_tokens: int = 20) -> list[str]:

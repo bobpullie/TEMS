@@ -34,6 +34,61 @@ QMD_CMD = "qmd.cmd" if sys.platform == "win32" else "qmd"
 
 
 # ═══════════════════════════════════════════════════════════
+# CUDA / Dense 가용성 자동 감지
+# ═══════════════════════════════════════════════════════════
+
+# 모듈 전역 — 프로세스 lifetime 캐시 (한 번 결정되면 재평가 안 함)
+_DENSE_AVAILABLE: Optional[bool] = None
+
+
+def _check_dense_available() -> bool:
+    """qmd dense 검색 가용성을 1회 체크하고 프로세스 lifetime 동안 캐시.
+
+    우선순위:
+    1. TEMS_DENSE=0 env → 강제 disable (사용자 명시 폴백)
+    2. TEMS_DENSE=1 env → 강제 enable (자동 감지 우회, 사용자 강제)
+    3. qmd 명령 자체 부재 → disable
+    4. nvidia-smi 명령 부재 또는 exit≠0 → disable (CUDA 없음)
+    5. 모두 통과 → enable
+
+    nvidia-smi 첫 호출은 100-300ms 가능하나 1회 캐시되므로 lifetime 비용은 1회.
+    """
+    global _DENSE_AVAILABLE
+    if _DENSE_AVAILABLE is not None:
+        return _DENSE_AVAILABLE
+
+    import os
+    val = os.environ.get("TEMS_DENSE", "").strip()
+    if val == "0":
+        _DENSE_AVAILABLE = False
+        return False
+    if val == "1":
+        _DENSE_AVAILABLE = True
+        return True
+
+    # qmd 부재 → 어차피 dense 불가
+    if shutil.which(QMD_CMD) is None:
+        _DENSE_AVAILABLE = False
+        return False
+
+    # CUDA 부재 → CPU 폴백 시 1시간+ 비용 발생 → disable
+    if shutil.which("nvidia-smi") is None:
+        _DENSE_AVAILABLE = False
+        return False
+    try:
+        r = subprocess.run(["nvidia-smi"], capture_output=True, timeout=2)
+        if r.returncode != 0:
+            _DENSE_AVAILABLE = False
+            return False
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        _DENSE_AVAILABLE = False
+        return False
+
+    _DENSE_AVAILABLE = True
+    return True
+
+
+# ═══════════════════════════════════════════════════════════
 # Phase 1: Hybrid Retrieval with RRF
 # ═══════════════════════════════════════════════════════════
 
@@ -99,6 +154,9 @@ class HybridRetriever:
         QMD 결과의 파일명(rule_NNNN.md)에서 rule_id를 추출하여
         SQLite DB에서 전체 규칙 데이터를 로드.
         """
+        # CUDA 부재 환경 자동 폴백 — qmd subprocess 자체 회피
+        if not _check_dense_available():
+            return []
         try:
             result = subprocess.run(
                 [QMD_CMD, "vsearch", query, "-c", self.collection, "--json"],

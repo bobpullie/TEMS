@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tems"
-version = "0.2.1"
+version = "0.2.2"
 description = "Topological Evolving Memory System — self-evolving agent memory with FTS5+BM25, topological health scoring, and hybrid retrieval"
 requires-python = ">=3.10"
 license = {text = "MIT"}

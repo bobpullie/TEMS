@@ -154,6 +154,21 @@ class MemoryDB:
         tags_str = ", ".join(context_tags)
         if not summary:
             summary = self._auto_summarize(correction_rule)
+
+        # keyword_trigger 자동 보완 — 한국어 어간 추가 (BM25 매칭 강화)
+        if keyword_trigger:
+            from tems.korean_utils import strip_korean_suffix  # lazy import (순환 import 회피)
+            tokens = keyword_trigger.split()
+            extras = []
+            seen = set(t.lower() for t in tokens)
+            for tok in tokens:
+                stem = strip_korean_suffix(tok)
+                if stem != tok and len(stem) > 1 and stem.lower() not in seen:
+                    extras.append(stem)
+                    seen.add(stem.lower())
+            if extras:
+                keyword_trigger = keyword_trigger + " " + " ".join(extras)
+
         with self._conn() as conn:
             cursor = conn.execute(
                 """

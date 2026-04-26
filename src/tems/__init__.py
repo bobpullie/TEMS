@@ -4,7 +4,7 @@ Self-evolving agent memory with FTS5+BM25, topological health scoring,
 and hybrid sparse-dense retrieval.
 """
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 from .fts5_memory import MemoryDB
 from .tems_engine import (
