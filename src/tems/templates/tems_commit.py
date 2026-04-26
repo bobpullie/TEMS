@@ -102,7 +102,21 @@ def commit_rule(category: str, rule: str, triggers: str, tags: str, source: str 
         except sqlite3.IntegrityError:
             pass  # 이미 존재
 
-    # QMD 자동 동기화
+    # Dense 자동 임베딩 hook (v0.3)
+    try:
+        from tems.tems_engine import _check_dense_available, get_dense_backend
+        if _check_dense_available():
+            backend = get_dense_backend()
+            if backend is not None:
+                from tems.vector_store import VectorStore
+                text = f"{rule}\n{triggers}\n{tags}"
+                vec = backend.embed(text)
+                store = VectorStore(DB_PATH)
+                store.upsert(rule_id, vec, backend.model_id)
+    except Exception:
+        pass  # 임베딩 실패 → BM25만으로 폴백, 규칙 등록은 성공
+
+    # QMD 자동 동기화 (레거시 — QMD 환경 있을 경우만 동작)
     try:
         from tems.tems_engine import sync_single_rule_to_qmd
         sync_single_rule_to_qmd(rule_id, db=db, qmd_rules_dir=QMD_RULES_DIR)

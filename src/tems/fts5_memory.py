@@ -51,12 +51,15 @@ class MemoryDB:
                 )
             """)
 
-            for col, default in [
-                ("keyword_trigger", "''"),
-                ("summary", "''"),
+            for col, col_type, default in [
+                ("keyword_trigger", "TEXT", "''"),
+                ("summary", "TEXT", "''"),
+                ("embedding", "BLOB", "NULL"),
             ]:
                 try:
-                    conn.execute(f"ALTER TABLE memory_logs ADD COLUMN {col} TEXT DEFAULT {default}")
+                    conn.execute(
+                        f"ALTER TABLE memory_logs ADD COLUMN {col} {col_type} DEFAULT {default}"
+                    )
                 except sqlite3.OperationalError:
                     pass
 

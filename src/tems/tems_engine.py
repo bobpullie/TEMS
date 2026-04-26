@@ -19,6 +19,7 @@ import subprocess
 import sqlite3
 import shutil
 import sys
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -34,58 +35,54 @@ QMD_CMD = "qmd.cmd" if sys.platform == "win32" else "qmd"
 
 
 # ═══════════════════════════════════════════════════════════
-# CUDA / Dense 가용성 자동 감지
+# Dense 백엔드 — 측정 기반 자동 감지 (v0.3)
 # ═══════════════════════════════════════════════════════════
 
 # 모듈 전역 — 프로세스 lifetime 캐시 (한 번 결정되면 재평가 안 함)
-_DENSE_AVAILABLE: Optional[bool] = None
+_DENSE_BACKEND: Optional["EmbeddingBackend"] = None  # type: ignore[name-defined]
 
 
 def _check_dense_available() -> bool:
-    """qmd dense 검색 가용성을 1회 체크하고 프로세스 lifetime 동안 캐시.
+    """임베딩 백엔드 가용성을 1회 체크하고 프로세스 lifetime 동안 캐시.
 
-    우선순위:
+    우선순위 (spec §2):
     1. TEMS_DENSE=0 env → 강제 disable (사용자 명시 폴백)
-    2. TEMS_DENSE=1 env → 강제 enable (자동 감지 우회, 사용자 강제)
-    3. qmd 명령 자체 부재 → disable
-    4. nvidia-smi 명령 부재 또는 exit≠0 → disable (CUDA 없음)
-    5. 모두 통과 → enable
+    2. TEMS_DENSE=1 env → detect_backend() 호출 후 결과 사용
+    3. 미설정 → 자동 감지 (latency 측정 기반)
 
-    nvidia-smi 첫 호출은 100-300ms 가능하나 1회 캐시되므로 lifetime 비용은 1회.
+    RuntimeError는 절대 raise하지 않음 — 실패 시 False 반환 (BM25 폴백).
     """
-    global _DENSE_AVAILABLE
-    if _DENSE_AVAILABLE is not None:
-        return _DENSE_AVAILABLE
-
-    import os
-    val = os.environ.get("TEMS_DENSE", "").strip()
-    if val == "0":
-        _DENSE_AVAILABLE = False
-        return False
-    if val == "1":
-        _DENSE_AVAILABLE = True
+    global _DENSE_BACKEND
+    if _DENSE_BACKEND is not None:
         return True
 
-    # qmd 부재 → 어차피 dense 불가
-    if shutil.which(QMD_CMD) is None:
-        _DENSE_AVAILABLE = False
+    val = os.environ.get("TEMS_DENSE", "").strip()
+    if val == "0":
         return False
+    if val == "1":
+        try:
+            from .dense_backend import detect_backend
+            _DENSE_BACKEND = detect_backend()
+        except Exception:
+            pass
+        return _DENSE_BACKEND is not None
 
-    # CUDA 부재 → CPU 폴백 시 1시간+ 비용 발생 → disable
-    if shutil.which("nvidia-smi") is None:
-        _DENSE_AVAILABLE = False
-        return False
+    # 자동 감지
     try:
-        r = subprocess.run(["nvidia-smi"], capture_output=True, timeout=2)
-        if r.returncode != 0:
-            _DENSE_AVAILABLE = False
-            return False
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        _DENSE_AVAILABLE = False
-        return False
+        from .dense_backend import detect_backend
+        _DENSE_BACKEND = detect_backend()
+    except Exception:
+        pass
+    return _DENSE_BACKEND is not None
 
-    _DENSE_AVAILABLE = True
-    return True
+
+def get_dense_backend():
+    """현재 캐시된 dense backend 인스턴스 반환 (None이면 미가용).
+
+    `from tems_engine import _DENSE_BACKEND`는 import 시점 None을 캐시하므로
+    외부 모듈은 반드시 이 getter를 통해 최신 값을 조회.
+    """
+    return _DENSE_BACKEND
 
 
 # ═══════════════════════════════════════════════════════════
@@ -149,43 +146,26 @@ class HybridRetriever:
             return []
 
     def _dense_search(self, query: str, limit: int = 20) -> list[dict]:
-        """QMD 벡터 검색 — tems-wesanggoon 컬렉션에서 규칙 검색.
+        """LM Studio /v1/embeddings + SQLite BLOB 벡터 검색 (v0.3).
 
-        QMD 결과의 파일명(rule_NNNN.md)에서 rule_id를 추출하여
-        SQLite DB에서 전체 규칙 데이터를 로드.
+        qmd subprocess 의존 제거 — VectorStore 직접 사용.
+        임베딩 서버 장애 시 빈 리스트 반환 (BM25 폴백 보장).
         """
-        # CUDA 부재 환경 자동 폴백 — qmd subprocess 자체 회피
         if not _check_dense_available():
             return []
         try:
-            result = subprocess.run(
-                [QMD_CMD, "vsearch", query, "-c", self.collection, "--json"],
-                capture_output=True, timeout=15,
-            )
-            stdout = result.stdout.decode("utf-8", errors="replace").strip()
-            if not stdout:
-                return []
-
-            # QMD stdout에 쿼리 확장 프리앰블이 포함됨 — JSON 배열만 추출
-            json_start = stdout.find("[")
-            if json_start < 0:
-                return []
-            qmd_results = json.loads(stdout[json_start:])
-            converted = []
-            for item in qmd_results[:limit]:
-                rule_id = self._extract_rule_id(item.get("file", ""))
-                if rule_id is None:
-                    continue
-
+            qv = _DENSE_BACKEND.embed(query)
+            from .vector_store import VectorStore
+            store = VectorStore(self.db.db_path)
+            hits = store.search(qv, limit=limit)
+            results = []
+            for rule_id, score in hits:
                 rule = self._load_rule_by_id(rule_id)
-                if rule is None:
-                    continue
-
-                rule["source"] = "qmd"
-                rule["qmd_score"] = item.get("score", 0)
-                converted.append(rule)
-
-            return converted
+                if rule:
+                    rule["source"] = "dense"
+                    rule["dense_score"] = score
+                    results.append(rule)
+            return results
         except Exception:
             return []
 
@@ -229,14 +209,14 @@ class HybridRetriever:
 
         구체적/기술적 쿼리 → sparse(BM25) 가중치 ↑
         추상적/개념적 쿼리 → dense(벡터) 가중치 ↑
+
+        v0.3: dense 메인, BM25 보강 (v0.2 반대)
+        specificity=0 (추상): sparse=0.20, dense=0.80
+        specificity=1 (구체): sparse=0.50, dense=0.50
         """
         specificity = self._query_specificity(query)
-        # specificity: 0.0 (매우 추상적) ~ 1.0 (매우 구체적)
-        # v2: 규칙 DB 대상이므로 BM25 기본 우위 + dense 보완
-        # specificity=0 (추상): sparse=0.35, dense=0.65
-        # specificity=1 (구체): sparse=0.85, dense=0.15
-        sparse_w = 0.35 + 0.5 * specificity      # 0.35 ~ 0.85
-        dense_w = 0.65 - 0.5 * specificity        # 0.15 ~ 0.65
+        sparse_w = 0.20 + 0.30 * specificity      # 0.20 ~ 0.50
+        dense_w = 1.0 - sparse_w                   # 0.80 ~ 0.50
         return sparse_w, dense_w
 
     def _query_specificity(self, query: str) -> float:
