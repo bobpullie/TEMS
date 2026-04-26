@@ -1,6 +1,6 @@
 # TEMS — Topological Evolving Memory System
 
-> LLM 에이전트의 행동을 규칙으로 구조화하여 반복 실수를 자동 차단·교정하는 자기진화 메모리 시스템.
+> ClaudeCode에이전트와 대규모 프로젝트 진행시 갈수록 쌓여가는 규칙과 프로토콜들로 무거워지는 하네스를 프로젝트 맥락에 맞춰 한정된 컨텍스트메모리 안에서 효율적으로 자동운영. LLM 에이전트의 행동을 규칙으로 구조화하여 반복 실수를 자동 차단·교정하는 자기진화 메모리 시스템. 한글기반 대규모 vibe코딩프로젝트 특화.
 
 **Upstream:** https://github.com/bobpullie/TEMS
 
@@ -157,7 +157,7 @@ TEMS_DENSE=0 python memory/tems_commit.py --type TCL ...
 
 ---
 
-## 왜 필요한가
+## 왜 필요한가 ? 
 
 CLAUDE.md 같은 정적 지시 파일의 한계:
 
@@ -548,7 +548,7 @@ tail -20 memory/compliance_events.jsonl | jq .
 이슈 / PR 환영.
 
 - Upstream: https://github.com/bobpullie/TEMS
-- TEMS 는 김종일이 경험적으로 도출한 구조
+- TEMS 는 에이전트를 이용한 나의 여러 프로젝트자동화와 독립적인 앱들을 제작하면서 경험적으로 도출한 구조
 - 외부 레퍼런스 없이 자체 개발 (empirical architecture, no paper citations)
 
 ## License
