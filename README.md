@@ -63,6 +63,100 @@ tems restore --agent-id <AGENT_ID>
 
 ---
 
+## Hybrid Search — Dense + BM25 (v0.3+ 기본 활성)
+
+TEMS v0.3부터 한글 의미 검색을 기본 지원한다. BM25 키워드 매칭만으로는 어휘 변형·활용형·동의어에 취약하다는 한계를 Dense 벡터 검색으로 보강한다.
+
+**작동 방식:**
+- LM Studio, Ollama, vLLM 등 OpenAI-compat `/v1/embeddings` 엔드포인트를 자동 감지
+- 한글 e2e 임베딩 latency 측정 기반 자동 판별: **평균 < 300ms → dense main(가중치 0.8), BM25 보강(0.2)**
+- CUDA 없는 Vulkan iGPU 환경(미니PC, AMD 노트북)도 지원 — Qwen3-Embedding-0.6B-Q8_0 + Vulkan 기준 평균 31ms 달성
+- 측정 실패(서버 미기동 / latency ≥ 300ms) 시 BM25-only로 자동 폴백
+
+**환경변수:**
+
+| 환경변수 | 기본값 | 설명 |
+|----------|--------|------|
+| `TEMS_EMBED_URL` | `http://localhost:1234/v1` | LM Studio 또는 기타 임베딩 서버 주소 |
+| `TEMS_EMBED_MODEL` | 자동 감지 (첫 임베딩 모델) | 사용할 임베딩 모델 ID |
+| `TEMS_DENSE` | 미설정 (자동) | `0` = 강제 BM25-only, `1` = 강제 dense 활성 |
+
+```bash
+# LM Studio 기본값 사용 시 (포트 1234, 임베딩 모델 자동 감지)
+tems scaffold ...  # 자동 감지 후 dense 활성
+
+# 특정 모델 지정
+TEMS_EMBED_MODEL=Qwen3-Embedding-0.6B-Q8_0 python memory/preflight_hook.py
+
+# BM25 only 강제 (CI, 서버 등 임베딩 서버 없는 환경)
+TEMS_DENSE=0 python memory/tems_commit.py --type TCL ...
+```
+
+**구현 모듈:**
+- `dense_backend.py` — `OpenAICompatBackend` + `detect_backend()` 자동 감지 (외부 deps 0, urllib.request만 사용)
+- `vector_store.py` — SQLite BLOB 저장 + 코사인 전체스캔 (1,000 규칙 < 100ms)
+
+**한국어 keyword_trigger 자동 보완 (v0.2.2~ 유지):** `commit_memory()` 호출 시 `keyword_trigger` 내 한국어 단어의 어간이 자동 추가됨 (예: `"퇴근합시다"` → `"퇴근합시다 퇴근"`). FTS5 BM25 prefix 매칭 적중률 향상용. v0.3에서도 동일하게 동작 — Dense fallback 시 sparse 보강 효과.
+
+---
+
+## Korean Agent Use Cases — TEMS의 가치
+
+한글 환경 에이전트에서 Dense + BM25 하이브리드가 BM25-only 대비 실질적으로 달라지는 3가지 사례.
+
+### 1. 대규모 코드 빌드 (장시간 세션)
+
+```
+# 시나리오: 50파일 변경, 컴파일 에러 23개, 30분 디버깅 세션
+
+[BM25 only]
+사용자: "import 순환 참조 같은데"
+→ "import" 키워드 매칭 → 일반 import 가이드 5개 → 노이즈
+
+[Dense + BM25 (v0.3)]
+사용자: "import 순환 참조 같은데"
+→ 의미 임베딩 → "Python 패키징 — flat layout pythonpath" 규칙 #1
+→ "circular import에서 부분 모듈만 가져오기" 사례 #2
+→ 정확히 30분 전에 본인이 등록한 같은 패턴 회상
+```
+
+### 2. 한글 맥락 명령
+
+```
+[BM25 only]
+사용자: "퇴근하자"
+→ keyword_trigger 매칭 실패 (FTS5 한글 토크나이저 한계)
+→ 세션 종료 hook 미발동
+
+[Dense + BM25 (v0.3)]
+사용자: "퇴근하자"
+→ 의미 임베딩 → "session shutdown trigger" 의미 매칭
+→ handover_doc 자동 생성 hook 발동
+```
+
+### 3. 한영 혼용 코드베이스
+
+```
+[BM25 only]
+사용자: "이거 deprecate 처리해줘"
+→ "deprecate" 영문 토큰만 매칭 → 영문 가이드만 회수
+
+[Dense + BM25 (v0.3)]
+사용자: "이거 deprecate 처리해줘"
+→ 한국어 "처리" + 영어 "deprecate" 의미 결합
+→ "API deprecation 한글 changelog 작성 규칙" 회수
+```
+
+---
+
+## Auto-Setup — 벡터 환경 자동 안내 (PR2 예정)
+
+- 첫 실행 시 임베딩 서버 미감지 → Vulkan/CUDA 검사 → 설치 가이드 자동 제시
+- 한글 locale 감지 시 Qwen3-Embedding-0.6B 권장
+- 영문 위주 시 embeddinggemma-300M 권장
+
+---
+
 ## 왜 필요한가
 
 CLAUDE.md 같은 정적 지시 파일의 한계:
@@ -311,60 +405,6 @@ final_score = 0.6 * BM25_rank_score + 0.4 * THS_score
 
 ---
 
-## Advanced: Dense Fallback (QMD / CUDA, 선택)
-
-BM25 키워드 매칭은 어휘 변형(동의어·활용형)에 약하다. 의미 기반 보강이 필요하면 Dense vector fallback 을 활성화할 수 있다.
-
-**패키지 코드는 이미 지원:**
-- `tems.tems_engine.HybridRetriever` — BM25 1차 + dense 2차 rank fusion
-- `templates/preflight_hook.py` 는 `HybridRetriever` 를 import 해 두었고, BM25 hit 이 빈약할 때(`< 2`) 폴백
-
-**활성 조건:**
-1. QMD (Quantized Metric Dense) 백엔드 설치 — CUDA 환경 + `qmd-embed` 스킬 / CLI 필요 (별도 제공)
-2. 해당 에이전트용 QMD 컬렉션 생성 — 규칙을 벡터로 임베딩
-3. 템플릿 preflight 에서 `SEMANTIC_FALLBACK_ENABLED = True` (기본 미선언 — 필요 시 에이전트별 커스터마이징)
-
-**사용 시 장점:**
-- `ComfyUI 워크플로우 검증` 프롬프트가 `comfy workflow validate` 규칙과 매칭 — 어휘 변형에 robust
-- 한국어·영어 혼용 프롬프트의 semantic 유사도 포착
-- BM25 이 놓치는 의미 매칭 구원
-
-**사용하지 않아도 되는 경우:**
-- 규칙 수 < 50 이고 키워드가 잘 정렬돼 있으면 BM25 만으로 충분
-- CUDA 환경 없는 배포처 (서버·CI 등)
-- 초기 온보딩 단계 — BM25 먼저 검증 후 필요 시 dense 추가
-
-**기본값은 꺼진 상태** — BM25 only 로 plug-and-play 동작. QMD 사용은 완전 선택 사항.
-
----
-
-## BM25-only 자동 폴백 (v0.2.2~)
-
-CUDA가 없는 환경(미니PC, 노트북)에서는 CPU dense 폴백 시 규칙 등록에 1시간+ 소요됩니다.
-v0.2.2부터 TEMS는 시작 시 `nvidia-smi`로 CUDA 가용성을 자동 감지하여, CUDA가 없으면
-`_dense_search()`를 완전히 건너뛰고 FTS5 BM25만 사용합니다.
-
-**환경변수 override:**
-
-| 환경변수 | 동작 |
-|----------|------|
-| `TEMS_DENSE=0` | CUDA 유무와 관계없이 dense 강제 비활성 (BM25 only) |
-| `TEMS_DENSE=1` | nvidia-smi 감지 없이 dense 강제 활성 (자동 감지 우회) |
-
-```bash
-# BM25 only 강제 (미니PC, 노트북)
-TEMS_DENSE=0 python memory/tems_commit.py --type TCL ...
-
-# CUDA 있으나 nvidia-smi path 문제로 자동 감지 실패 시
-TEMS_DENSE=1 python memory/tems_commit.py --type TCL ...
-```
-
-**한국어 keyword_trigger 자동 보완:** `commit_memory()` 호출 시 `keyword_trigger` 내
-한국어 단어의 어간이 자동 추가됩니다 (예: `"퇴근합시다"` → `"퇴근합시다 퇴근"`).
-이를 통해 FTS5 BM25 prefix 매칭 적중률이 향상됩니다.
-
----
-
 ## 규칙 진화 (Self-Evolution)
 
 ### Trigger Counting
@@ -489,6 +529,7 @@ tail -20 memory/compliance_events.jsonl | jq .
 | 0.1.0 | Phase 2 | self-contained retrieval + 게이트 A~E + 패키지화 + scaffold CLI |
 | 0.2.0 | Phase 3 + Layer 1 강화 | tool_gate_hook (deny), compliance_tracker, decay, pattern_detector, tool_failure, retrospective, memory_bridge, sdc_commit 템플릿 추가. preflight 에 violation_count 노출 + 필수 준수 헤더. scaffold 가 6개 hook 이벤트 등록. Phase 2→3 in-place DB 마이그레이션. |
 | **0.2.1** | **Patch** | **Template preflight 의 `detect_project_scope` 가 Registry 미설정 시 cwd fallback 으로 `project:X` 태그 규칙 매칭 가능. `__version__` 상수 동기화. QMD Dense Fallback README 섹션 추가.** |
+| **0.3.0** | **Dense Backend** | **QMD CLI 제거 → LM Studio `/v1/embeddings` 직호출 (`dense_backend.py`, `vector_store.py`). dense 가용성 판별 기준을 nvidia-smi → 한글 e2e latency < 300ms로 변경. Vulkan iGPU 환경 지원. `TEMS_EMBED_URL` / `TEMS_EMBED_MODEL` 환경변수 도입. 가중치 반전: dense 0.8 main, BM25 0.2 보강. `tems embed [--force]` CLI 명령 추가.** |
 
 ---
 

@@ -1,4 +1,4 @@
-"""TEMS CLI — scaffold + init-skill commands."""
+"""TEMS CLI — scaffold + init-skill + embed commands."""
 
 import argparse
 import importlib.resources
@@ -90,6 +90,90 @@ def cmd_restore(args):
     return 0 if result.get("ok") else 1
 
 
+def cmd_embed(args):
+    """인덱스 재생성: embedding_meta와 현재 backend model_id 비교 → 불일치 rule 재임베딩."""
+    from .tems_engine import _check_dense_available, get_dense_backend
+
+    if not _check_dense_available():
+        result = {"ok": False, "error": "Dense backend not available. Check TEMS_EMBED_URL / LM Studio."}
+        print(json.dumps(result, ensure_ascii=False))
+        return 1
+    backend = get_dense_backend()
+    if backend is None:
+        result = {"ok": False, "error": "Dense backend cache empty after availability check."}
+        print(json.dumps(result, ensure_ascii=False))
+        return 1
+
+    # DB 경로 탐색 — TEMS_DB_PATH 환경변수 또는 tems_agent_id marker 순회
+    import os
+    db_path = os.environ.get("TEMS_DB_PATH", "")
+    if not db_path:
+        # marker 순회
+        cur = Path.cwd()
+        while cur != cur.parent:
+            marker = cur / ".claude" / "tems_agent_id"
+            if marker.exists():
+                db_path = str(cur / "memory" / "error_logs.db")
+                break
+            cur = cur.parent
+
+    if not db_path or not Path(db_path).exists():
+        result = {"ok": False, "error": f"DB not found. Set TEMS_DB_PATH or run from agent root."}
+        print(json.dumps(result, ensure_ascii=False))
+        return 1
+
+    from .fts5_memory import MemoryDB
+    from .vector_store import VectorStore
+
+    db = MemoryDB(db_path=db_path)
+    store = VectorStore(db_path)
+    model_id = backend.model_id
+
+    if args.force:
+        # 전체 재임베딩
+        with db._conn() as conn:
+            rules = conn.execute("SELECT * FROM memory_logs").fetchall()
+        target_ids = [r["id"] for r in rules]
+    elif args.rule_id is not None:
+        target_ids = [args.rule_id]
+    else:
+        target_ids = store.needs_reindex(model_id)
+
+    if not target_ids:
+        result = {"ok": True, "embedded": 0, "message": "All rules already indexed with current model."}
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+
+    embedded = 0
+    errors = 0
+
+    for rule_id in target_ids:
+        try:
+            with db._conn() as conn:
+                row = conn.execute(
+                    "SELECT action_taken, correction_rule, keyword_trigger FROM memory_logs WHERE id = ?",
+                    (rule_id,),
+                ).fetchone()
+            if not row:
+                continue
+            text = f"{row['action_taken'] or ''}\n{row['correction_rule'] or ''}\n{row['keyword_trigger'] or ''}"
+            vec = backend.embed(text)
+            store.upsert(rule_id, vec, model_id)
+            embedded += 1
+        except Exception as e:
+            errors += 1
+
+    result = {
+        "ok": True,
+        "embedded": embedded,
+        "errors": errors,
+        "model_id": model_id,
+        "total_targets": len(target_ids),
+    }
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(prog="tems", description="TEMS - Topological Evolving Memory System")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -106,6 +190,11 @@ def main():
     # init-skill
     p_init = subparsers.add_parser("init-skill", help="Deploy Claude Code skill")
     p_init.add_argument("--target", default=None)
+
+    # embed (v0.3)
+    p_embed = subparsers.add_parser("embed", help="Re-index embeddings for rules")
+    p_embed.add_argument("--force", action="store_true", help="Ignore model mismatch, re-embed all rules")
+    p_embed.add_argument("--rule-id", type=int, default=None, help="Re-embed a single rule by ID")
 
     # restore
     p_restore = subparsers.add_parser("restore", help="Restore agent from registry")
@@ -137,6 +226,7 @@ def main():
         "scaffold": cmd_scaffold,
         "init-skill": cmd_init_skill,
         "restore": cmd_restore,
+        "embed": cmd_embed,
     }
 
     if args.command in handlers:
