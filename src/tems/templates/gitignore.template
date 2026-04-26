@@ -1,0 +1,11 @@
+# ════════════════════════════════════════════════════════════
+# TEMS runtime state — 머신별 축적되는 런타임 상태
+# 정규 소스는 memory/qmd_rules/*.md (tems_commit이 자동 생성)
+# 복원: tems rebuild (tems rebuild_from_qmd 명령어 사용)
+# ════════════════════════════════════════════════════════════
+memory/error_logs.db
+memory/error_logs.db-journal
+memory/error_logs.db-wal
+memory/error_logs.db-shm
+memory/__pycache__/
+memory/*.pyc
