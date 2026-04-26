@@ -11,7 +11,7 @@
 TEMS 는 다음 세 가지를 한꺼번에 해결하는 경량 SQLite 기반 프레임워크다.
 
 1. **행동 규칙을 영속화** — 사용자 지시와 누적 실수를 구조화된 규칙(TCL/TGL)으로 DB 에 저장
-2. **매 대화마다 관련 규칙을 자동 주입** — `UserPromptSubmit` hook 에서 BM25 매칭으로 현재 맥락에 맞는 규칙만 LLM 컨텍스트에 삽입
+2. **매 대화마다 관련 규칙을 자동 주입** — `UserPromptSubmit` hook 에서 Hybrid (Dense + BM25) 매칭으로 현재 맥락에 맞는 규칙만 LLM 컨텍스트에 삽입 (v0.3+ — 임베딩 서버 미감지 시 BM25-only 자동 폴백)
 3. **준수/위반을 자동 측정하고 진화** — `PostToolUse` 에서 위반을 감지해 카운팅, 반복 위반 규칙은 hook 레벨로 승격 또는 archive
 
 CLAUDE.md / system prompt 에 자연어 지시를 쌓아올리는 방식과 다르게, TEMS 는 **규칙을 데이터로 취급**하여 검색·카운팅·decay 가 가능하다.
@@ -167,7 +167,7 @@ CLAUDE.md 같은 정적 지시 파일의 한계:
 | 효용도 측정 불가 | 어느 지시가 실효인지 알 수 없음 | `fire_count` / `compliance_count` / `violation_count` 자동 누적 |
 | 누적 실수 학습 불가 | 같은 실수를 세션마다 반복 | `pattern_detector` 로 N≥5회 반복 패턴 자동 TGL 등록 |
 | 강제력 없음 | LLM 순응에만 의존 | TGL-T 는 `PreToolUse` 에서 도구 호출 자체를 harness 차단 |
-| 검색 불가 | 키워드로 찾을 수 없음 | FTS5 BM25 검색 |
+| 검색 불가 | 키워드로 찾을 수 없음 | Hybrid Dense + BM25 검색 (의미 + 키워드 결합, v0.3+) |
 
 ---
 
@@ -182,7 +182,7 @@ CLAUDE.md 같은 정적 지시 파일의 한계:
 | 본질 | 명시적 사용자 지시 · 국지적 규약 | 누적 실수에서 추출한 카테고리 가드 |
 | 트리거 | "앞으로/이제부터/항상/반드시" 명시 | 동일 시그니처 N≥5회 자동 감지 또는 명시 지시 |
 | 일반화 | L1 Concrete Pattern | L2 Topological Case (sweet spot 강제) |
-| 매칭 | BM25 키워드(1차) | dense semantic(1차) + BM25(보강) |
+| 매칭 | Hybrid (Dense 0.8 + BM25 0.2) — RRF 결합 | Hybrid (Dense 0.8 + BM25 0.2) — RRF 결합 |
 | 예시 | "세션 종료 시 핸드오버 작성" | "외부 패키지는 `pip show` 로 존재 검증 후 import" |
 
 **L2 Topological Case** 가 sweet spot — L0 는 1회성이라 재사용 불가, L1 은 여전히 구체적, L3 이상은 도메인 초월이라 과잉 적용. L2 는 "여러 도메인에 걸쳐 같은 구조의 실수가 재발하는 경우" 를 잡는 추상화 수준.
@@ -211,9 +211,10 @@ TGL 은 **발동 Hook 시점** 기준으로 7개 카테고리로 분류된다.
       ▼
 ┌─────────────────────┐
 │ UserPromptSubmit    │  preflight_hook.py
-│ ─ BM25 검색         │  → <preflight-memory-check>
-│ ─ score gate        │    TGL/TCL 규칙 주입
-│                     │    + violation_count 노출 (Layer 1)
+│ ─ Hybrid 검색       │  → <preflight-memory-check>
+│   (Dense + BM25)    │    TGL/TCL 규칙 주입
+│ ─ score gate        │    + violation_count 노출 (Layer 1)
+│                     │    (임베딩 서버 부재 시 BM25-only 자동)
 └──────────┬──────────┘
            │
            ▼
@@ -255,9 +256,11 @@ src/tems/
 ├── __init__.py
 ├── cli.py                     `tems` 명령 진입점
 ├── scaffold.py                신규 에이전트 부트스트랩 / restore / registry 관리
-├── fts5_memory.py             MemoryDB (BM25 전문검색)
-├── tems_engine.py             HybridRetriever / RuleGraph / PredictiveTGL / HealthScorer
-├── rebuild_from_qmd.py        qmd_rules → DB 재구축
+├── fts5_memory.py             MemoryDB (FTS5 BM25 + embedding BLOB 컬럼, v0.3+)
+├── dense_backend.py           OpenAICompatBackend + detect_backend (v0.3 신규, 외부 deps 0)
+├── vector_store.py            SQLite BLOB 벡터 저장 + 코사인 검색 (v0.3 신규)
+├── tems_engine.py             HybridRetriever (Dense+BM25 RRF) / RuleGraph / PredictiveTGL / HealthScorer
+├── rebuild_from_qmd.py        qmd_rules → DB 재구축 (legacy — v0.2 QMD 백엔드 호환용)
 ├── skill/
 │   └── SKILL.md               Claude Code Skill 정의 (/tems)
 └── templates/                 에이전트별 `memory/` 로 복사되는 hook 스크립트
@@ -296,8 +299,9 @@ src/tems/
 
 | 테이블 | 용도 |
 |--------|------|
-| `memory_logs` | 규칙 본문 (category, correction_rule, context_tags, severity, summary) |
+| `memory_logs` | 규칙 본문 (category, correction_rule, context_tags, severity, summary, **`embedding BLOB` v0.3+** — float32 little-endian 직렬화) |
 | `memory_fts` | FTS5 전문검색 가상 테이블 |
+| `embedding_meta` | **v0.3 신규** — `rule_id`, `model_id`, `dim`, `created_at`. 모델 변경 감지(`needs_reindex()`) 및 lazy reindex 지원 |
 | `rule_health` | `ths_score`, `fire_count`, `compliance_count`, `violation_count`, `status` (hot/warm/cold/archive), `classification`, `needs_review` |
 | `exceptions` | 예외 케이스 (승격 이력, persistence_score) |
 | `meta_rules` | 메타 규칙 조절 이력 (가중치 변경 근거) |
@@ -317,12 +321,24 @@ src/tems/
 사용자: "useEffect deps 에 currentPrice 넣어서 interval 재생성 문제 있는데"
 ```
 
-### Step 2 — preflight 키워드 추출 + BM25 검색
+### Step 2 — preflight Hybrid 검색 (Dense + BM25 RRF)
 
 ```python
+# v0.3+: dense backend 가용 시 두 경로 병렬 → RRF 결합
 keywords = ["useEffect", "deps", "currentPrice", "interval", "재생성"]
+
+# Sparse (BM25)
 fts_query = '"useEffect"* OR "deps"* OR "currentPrice"* OR ...'
+→ TGL #54 sparse rank #1
+
+# Dense (Qwen3-Embedding 등, /v1/embeddings)
+query_vec = embed("useEffect deps currentPrice interval 재생성 문제")
+→ TGL #54 dense_score 0.71 (rank #1, ~31ms)
+
+# RRF 결합 (sparse 0.2 + dense 0.8) + score gate
 → TGL #54 매칭 (final_score=0.73, THRESHOLD=0.55)
+
+# 임베딩 서버 부재/장애 시 자동으로 BM25-only 흐름으로 폴백
 ```
 
 ### Step 3 — 컨텍스트 주입
