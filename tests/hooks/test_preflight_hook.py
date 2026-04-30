@@ -23,20 +23,9 @@ AttributeError in conftest.py line 61. test_preflight_injects_matching_tgl is
 marked xfail until conftest or the hook template is fixed (encoding="utf-8" in
 subprocess.run, or the Korean header is removed/replaced).
 """
-import pytest
 from tests.hooks.conftest import run_hook, insert_rule
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Windows encoding bug: hook emits UTF-8 Korean header '[TGL] 필수 준수...' "
-        "but conftest.run_hook uses subprocess.run(text=True) which defaults to cp949 "
-        "on Windows, causing UnicodeDecodeError -> result.stdout=None -> AttributeError. "
-        "Fix: add encoding='utf-8' to subprocess.run() in conftest.py, or replace "
-        "the Korean hardcoded header in format_rules() with ASCII."
-    ),
-    strict=True,
-)
 def test_preflight_injects_matching_tgl(agent_dir):
     """FTS5-matching TGL rule must appear in <preflight-memory-check> block.
 
