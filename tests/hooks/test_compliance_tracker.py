@@ -22,19 +22,11 @@ Plan deviations:
 - tool_response must use "stdout" (not "stderr") for failure_signature matching.
 - remaining_checks field needed to prevent immediate window expiry.
 - No "forbidden:..." context_tag needed; rule_id + failure_signature is sufficient.
-
-Bug exposed (xfail):
-- update_counts() INSERT references "created_at" column that does not exist in
-  rule_health schema. Violation detection fires correctly (stdout emits
-  <compliance-violation>), but DB write silently fails with OperationalError.
-  Logged to tems_diagnostics.jsonl. Fix deferred to post PR-C.
 """
 import json
-import pytest
 from tests.hooks.conftest import run_hook, insert_rule, query_db
 
 
-@pytest.mark.xfail(strict=False, reason="bug: update_counts INSERT references created_at column absent from rule_health schema; violation detected but not persisted")
 def test_violation_increments_count(agent_dir):
     """A PostToolUse event matching a TGL's failure_signature increments
     rule_health.violation_count for that rule."""

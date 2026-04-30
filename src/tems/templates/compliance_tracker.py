@@ -130,15 +130,14 @@ def update_counts(rule_id: int, field: str) -> None:
     if field not in ("compliance", "violation"):
         return
     col = f"{field}_count"
-    now = datetime.now().isoformat()
     try:
         conn = sqlite3.connect(str(DB_PATH))
         conn.execute(f"""
-            INSERT INTO rule_health (rule_id, {col}, ths_score, status, created_at)
-            VALUES (?, 1, 0.5, 'warm', ?)
+            INSERT INTO rule_health (rule_id, {col}, ths_score, status)
+            VALUES (?, 1, 0.5, 'warm')
             ON CONFLICT(rule_id) DO UPDATE SET
                 {col} = COALESCE({col}, 0) + 1
-        """, (rule_id, now))
+        """, (rule_id,))
         conn.commit()
         conn.close()
     except Exception as e:
