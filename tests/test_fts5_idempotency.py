@@ -40,3 +40,19 @@ def test_fts_rowid_preserved_across_reconstruction(tmp_path):
     # Search must work after reconstruction
     hits = db2.search("widget")
     assert any(h["id"] == rid for h in hits)
+
+
+def test_wal_mode_enabled(tmp_path):
+    """Every connection should have journal_mode=WAL for hook concurrency."""
+    db = MemoryDB(str(tmp_path / "wal.db"))
+    with db._conn() as conn:
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    assert mode.lower() == "wal", f"Expected WAL, got {mode}"
+
+
+def test_busy_timeout_set(tmp_path):
+    """busy_timeout must be set so concurrent hooks don't immediately SQLITE_BUSY."""
+    db = MemoryDB(str(tmp_path / "busy.db"))
+    with db._conn() as conn:
+        timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    assert timeout >= 5000, f"Expected ≥5000ms, got {timeout}ms"
