@@ -25,6 +25,7 @@ def agent_dir(tmp_path) -> Path:
          "--cwd", str(cwd),
          "--registry-path", str(tmp_path / "registry.json")],
         capture_output=True, text=True, check=True,
+        encoding="utf-8",
     )
     out = json.loads(result.stdout)
     assert out.get("ok"), f"scaffold failed: {out}"
@@ -46,6 +47,10 @@ def run_hook(agent_root: Path, script: str, event: dict, timeout: float = 10.0) 
     # non-deterministic test results).
     env.pop("TEMS_REGISTRY_PATH", None)
     env.pop("TEMS_MEMORY_DIR", None)
+    # Force the child Python's stdout/stderr encoding to UTF-8 so hooks
+    # that emit non-ASCII text (e.g., Korean log strings) don't crash on
+    # Windows where the default would be cp949.
+    env["PYTHONIOENCODING"] = "utf-8"
     # Set CWD to agent root so any subprocess spawned by the hook with relative
     # paths resolves correctly. (Hooks themselves anchor on Path(__file__), not CWD.)
     result = subprocess.run(
@@ -53,6 +58,7 @@ def run_hook(agent_root: Path, script: str, event: dict, timeout: float = 10.0) 
         input=json.dumps(event),
         capture_output=True, text=True, timeout=timeout,
         cwd=str(agent_root), env=env,
+        encoding="utf-8",
     )
     assert result.returncode == 0, (
         f"Hook {script} exited {result.returncode}\n"
