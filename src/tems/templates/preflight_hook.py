@@ -8,6 +8,7 @@ preflight 검색을 수행합니다.
 import sys
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from tems.fts5_memory import MemoryDB
@@ -33,6 +34,27 @@ DB_PATH = AGENT_ROOT / "memory" / "error_logs.db"
 import os
 _reg_env = os.environ.get("TEMS_REGISTRY_PATH")
 REGISTRY_PATH = Path(_reg_env) if _reg_env else None
+
+
+def _log_diagnostic(error_type: str, exc: BaseException) -> None:
+    """preflight hook 내부 silent fail 진단 로그.
+
+    Why: bare ``except: pass`` 가 4 사이트에 존재해 hook 비정상 동작이 사용자에게
+    invisible. JSONL append 로 사후 분석 가능하게 함. 진단 자체 실패는 hook 본체
+    실행을 방해하지 않도록 무시.
+    """
+    try:
+        log_path = AGENT_ROOT / "logs" / "preflight_diagnostic.jsonl"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "error_type": error_type,
+                "exception": type(exc).__name__,
+                "message": str(exc),
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 def extract_keywords(prompt: str, max_tokens: int = 20) -> list[str]:
@@ -420,8 +442,8 @@ def main():
                         if hit.get("id") not in existing_ids:
                             base_result[cat].append(hit)
                             existing_ids.add(hit.get("id"))
-            except Exception:
-                pass
+            except Exception as e:
+                _log_diagnostic("preflight_hybrid_fallback_failure", e)
 
         # 2단계: Rule Graph 캐스케이드 — 직접 매칭된 규칙의 이웃도 포함
         direct_ids = []
@@ -439,8 +461,8 @@ def main():
                 cascade_hits = graph.get_cascade_rules(direct_ids, threshold=0.3)
                 # co-activation 기록 (그래프 학습)
                 graph.record_co_activation(prompt, direct_ids)
-            except Exception:
-                pass
+            except Exception as e:
+                _log_diagnostic("preflight_rule_graph_failure", e)
 
             # 3단계: Predictive TGL — TGL이 매칭되었으면 후속 에러 예측
             try:
@@ -454,8 +476,8 @@ def main():
                                 "predicted_error": p.get("correction_rule", ""),
                                 "confidence": p.get("confidence", 0),
                             })
-            except Exception:
-                pass
+            except Exception as e:
+                _log_diagnostic("preflight_predictive_tgl_failure", e)
 
         # 프로젝트 스코핑 필터 적용 (v2026.3.29 관리군)
         filtered_tcl = filter_by_project(base_result.get("tcl_hits", []), allowed_scopes)
@@ -485,9 +507,9 @@ def main():
         if output:
             print(output)
 
-    except Exception:
-        # hook 실패 시 조용히 종료 (에이전트 동작을 방해하지 않음)
-        pass
+    except Exception as e:
+        # hook 실패 시 stdout 은 조용히 (에이전트 동작 방해 금지). 단 진단 로그 남김.
+        _log_diagnostic("preflight_failure", e)
 
     sys.exit(0)
 

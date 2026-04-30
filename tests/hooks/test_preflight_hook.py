@@ -15,6 +15,8 @@ Hook contract (verified from src/tems/templates/preflight_hook.py):
 - Silent if no hits: format_rules() returns "" -> nothing printed -> empty stdout
   -> run_hook() returns {}.
 """
+import json
+
 from tests.hooks.conftest import run_hook, insert_rule
 
 
@@ -94,3 +96,38 @@ def test_preflight_never_blocks(agent_dir):
     """
     out = run_hook(agent_dir, "preflight_hook.py", {})
     assert out == {}, f"Empty event should produce no output, got: {out}"
+
+
+def test_preflight_outermost_failure_writes_diagnostic(agent_dir):
+    """Outermost ``except Exception`` must emit a diagnostic JSONL row instead
+    of silently swallowing the failure (Critical #5).
+
+    Force a hook crash by replacing memory/error_logs.db with a directory —
+    sqlite3.connect() will then raise inside EnhancedPreflight, propagating to
+    the outermost try in main(). We assert a row lands in
+    logs/preflight_diagnostic.jsonl with error_type=preflight_failure.
+    """
+    db_path = agent_dir / "memory" / "error_logs.db"
+    if db_path.exists():
+        db_path.unlink()
+    db_path.mkdir()  # opening as DB now raises OperationalError
+
+    event = {
+        "session_id": "s1",
+        "transcript_path": "",
+        "cwd": str(agent_dir),
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "any prompt that reaches DB access",
+    }
+    out = run_hook(agent_dir, "preflight_hook.py", event)
+    # Hook must still exit 0 (run_hook asserts) and produce no stdout.
+    assert out == {}, f"Failed hook must stay silent on stdout, got: {out}"
+
+    diag_path = agent_dir / "logs" / "preflight_diagnostic.jsonl"
+    assert diag_path.exists(), (
+        f"Expected diagnostic log at {diag_path}, hook silently swallowed failure"
+    )
+    rows = [json.loads(line) for line in diag_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert any(r.get("error_type") == "preflight_failure" for r in rows), (
+        f"No preflight_failure row in diagnostic log, got: {rows}"
+    )
