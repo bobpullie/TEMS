@@ -53,43 +53,9 @@ class VectorStore:
         return conn
 
     def _init_schema(self):
-        """embedding BLOB 컬럼 + embedding_meta 테이블 idempotent 생성."""
+        from tems.schema import apply_schema
         with self._conn() as conn:
-            # memory_logs가 없는 standalone DB(테스트 등)에도 동작하도록 최소 스키마 보장
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS memory_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
-                    context_tags TEXT NOT NULL DEFAULT '',
-                    keyword_trigger TEXT DEFAULT '',
-                    action_taken TEXT NOT NULL DEFAULT '',
-                    result TEXT NOT NULL DEFAULT '',
-                    correction_rule TEXT,
-                    category TEXT DEFAULT 'general',
-                    severity TEXT DEFAULT 'info',
-                    created_at TEXT DEFAULT (datetime('now')),
-                    embedding BLOB DEFAULT NULL
-                )
-            """)
-
-            # memory_logs.embedding 컬럼 추가 (이미 있으면 무시)
-            try:
-                conn.execute(
-                    "ALTER TABLE memory_logs ADD COLUMN embedding BLOB DEFAULT NULL"
-                )
-            except sqlite3.OperationalError:
-                pass  # 이미 존재 — idempotent
-
-            # embedding_meta 테이블 생성
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS embedding_meta (
-                    rule_id INTEGER PRIMARY KEY,
-                    model_id TEXT NOT NULL,
-                    dim INTEGER NOT NULL,
-                    created_at TEXT DEFAULT (datetime('now')),
-                    FOREIGN KEY (rule_id) REFERENCES memory_logs(id) ON DELETE CASCADE
-                )
-            """)
+            apply_schema(conn)
             conn.commit()
 
     def upsert(self, rule_id: int, vec: list[float], model_id: str) -> None:
