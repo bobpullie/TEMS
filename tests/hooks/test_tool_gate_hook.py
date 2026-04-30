@@ -77,3 +77,7 @@ def test_tgl_t_warning_does_not_deny(agent_dir):
     out = run_hook(agent_dir, "tool_gate_hook.py", event)
     decision = out.get("hookSpecificOutput", {}).get("permissionDecision")
     assert decision != "deny", f"Warning should not deny, got: {out}"
+    # Prove the rule actually fired (not a vacuous pass on rule-not-selected).
+    raw = out.get("_raw_stdout", "")
+    assert "<tgl-tool-alert>" in raw, f"Expected warning alert in stdout, got: {raw!r}"
+    assert "cat /etc/passwd" in raw, f"Expected pattern echoed in alert body, got: {raw!r}"
