@@ -9,6 +9,8 @@ PRAGMA user_version (SQLite-native, no auxiliary table needed).
 import sqlite3
 from typing import Callable
 
+__all__ = ["SCHEMA_VERSION", "MIGRATIONS", "apply_schema"]
+
 SCHEMA_VERSION = 1  # bump when adding a migration step
 
 # ─── Base tables (version 1) ────────────────────────────────────────────────
@@ -27,6 +29,7 @@ _BASE_TABLES = {
             category TEXT DEFAULT 'general',
             severity TEXT DEFAULT 'info',
             embedding BLOB DEFAULT NULL,
+            superseded_by TEXT DEFAULT NULL,
             created_at TEXT DEFAULT (datetime('now'))
         )
     """,
@@ -118,7 +121,7 @@ _BASE_TABLES = {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             prompt_text TEXT NOT NULL,
             missed_keywords TEXT NOT NULL,
-            should_have_matched_rule_id INTEGER,
+            should_have_matched_rule_id INTEGER,  -- nullable: engine passes None on unknown-rule misses
             was_expanded INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now'))
         )
@@ -200,8 +203,8 @@ _FTS_DDL = [
 # ─── Migration runner ───────────────────────────────────────────────────────
 
 # Each migration: function (conn) -> None that brings schema from version N to N+1.
-# v0 -> v1 is a no-op (apply_schema_v1 handles fresh + upgrade idempotently
-# via CREATE TABLE IF NOT EXISTS + ALTER TABLE for new columns).
+# v0 -> v1: initial schema creation + defensive column additions for pre-SOT DBs.
+# Idempotent via CREATE TABLE IF NOT EXISTS + ALTER TABLE catch-on-duplicate.
 
 def _add_missing_columns(
     conn: sqlite3.Connection,
@@ -217,8 +220,9 @@ def _add_missing_columns(
             conn.execute(
                 f"ALTER TABLE {table} ADD COLUMN {name} {typ} DEFAULT {default}"
             )
-        except sqlite3.OperationalError:
-            pass  # race with concurrent migration; idempotent retry safe
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower() and "already exists" not in str(exc).lower():
+                raise
 
 
 def _apply_schema_v1(conn: sqlite3.Connection) -> None:
@@ -229,6 +233,7 @@ def _apply_schema_v1(conn: sqlite3.Connection) -> None:
     _add_missing_columns(conn, "memory_logs", [
         ("summary", "TEXT", "''"),
         ("embedding", "BLOB", "NULL"),
+        ("superseded_by", "TEXT", "NULL"),
     ])
     _add_missing_columns(conn, "rule_health", [
         ("fire_count", "INTEGER", "0"),
@@ -238,6 +243,10 @@ def _apply_schema_v1(conn: sqlite3.Connection) -> None:
         ("classification", "TEXT", "NULL"),
         ("needs_review", "INTEGER", "0"),
         ("abstraction_level", "TEXT", "NULL"),
+    ])
+    _add_missing_columns(conn, "rule_edges", [
+        ("valid_from", "TEXT", "NULL"),
+        ("valid_until", "TEXT", "NULL"),
     ])
     for ddl in _FTS_DDL:
         conn.execute(ddl)
