@@ -61,21 +61,35 @@ class VectorStore:
     def upsert(self, rule_id: int, vec: list[float], model_id: str) -> None:
         """rule_id의 임베딩을 저장/갱신 (idempotent).
 
-        memory_logs 행이 없으면 최소 플레이스홀더를 INSERT한 뒤 embedding 갱신.
-        이는 standalone DB(테스트) 또는 향후 race condition 방지를 위함.
+        Critical #4 fix: 이전 구현은 memory_logs 행이 없을 때 빈 placeholder
+        row 를 INSERT OR IGNORE 했다. 이는 다음 부작용을 만들었다:
+          - COUNT(*) 가 phantom row 만큼 부풀려져 lifecycle 통계 오염
+          - FTS 트리거가 빈 placeholder 도 색인 → 검색 노이즈 + 후처리 비용
+          - embedding_meta 와 memory_logs 의 ID 정합 책임이 vector_store 에 묻힘
+
+        새 contract: 호출자가 memory_logs 에 룰을 먼저 commit 해야 한다.
+        rule_id 가 존재하지 않으면 stderr 경고 + 조용히 skip (raise 는 기존
+        호출자 호환성 유지를 위해 지양). 정상 경로 (commit_memory → embed → upsert)
+        는 동작 동일 — placeholder 생성만 사라짐.
         """
         blob = _pack_vec(vec)
         dim = len(vec)
 
         with self._conn() as conn:
-            # 행이 있으면 UPDATE, 없으면 INSERT OR IGNORE 후 UPDATE
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO memory_logs (id, timestamp, context_tags, action_taken, result)
-                VALUES (?, datetime('now'), '', '', '')
-                """,
+            # Precondition — 룰이 memory_logs 에 실제로 존재하는지 확인
+            exists = conn.execute(
+                "SELECT 1 FROM memory_logs WHERE id = ? LIMIT 1",
                 (rule_id,),
-            )
+            ).fetchone()
+            if not exists:
+                import sys
+                print(
+                    f"[vector_store] WARN: skip upsert(rule_id={rule_id}) — "
+                    f"memory_logs 에 해당 row 없음. commit_memory() 를 먼저 호출하세요.",
+                    file=sys.stderr,
+                )
+                return
+
             conn.execute(
                 "UPDATE memory_logs SET embedding = ? WHERE id = ?",
                 (blob, rule_id),
