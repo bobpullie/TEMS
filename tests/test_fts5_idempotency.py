@@ -1,5 +1,6 @@
 """FTS5 idempotency + WAL regression tests."""
 import sqlite3
+import threading
 
 from tems.fts5_memory import MemoryDB
 
@@ -56,3 +57,42 @@ def test_busy_timeout_set(tmp_path):
     with db._conn() as conn:
         timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
     assert timeout >= 5000, f"Expected ≥5000ms, got {timeout}ms"
+
+
+def test_concurrent_writers_no_busy_error(tmp_path):
+    """Two threads writing simultaneously must not raise SQLITE_BUSY thanks
+    to WAL + busy_timeout. Models the real workload of preflight + compliance
+    racing on the same DB.
+    """
+    db_path = tmp_path / "concurrent.db"
+    MemoryDB(str(db_path))  # initialize schema once
+
+    errors: list[Exception] = []
+    barrier = threading.Barrier(2)
+
+    def writer(tag: str):
+        try:
+            barrier.wait()
+            db = MemoryDB(str(db_path))
+            for i in range(20):
+                db.commit_memory(
+                    context_tags=[tag],
+                    action_taken=f"act_{tag}_{i}",
+                    result="r",
+                    correction_rule=f"rule_{tag}_{i}",
+                    keyword_trigger=f"kw_{tag}_{i}",
+                )
+        except Exception as e:
+            errors.append(e)
+
+    t1 = threading.Thread(target=writer, args=("t1",))
+    t2 = threading.Thread(target=writer, args=("t2",))
+    t1.start(); t2.start()
+    t1.join(); t2.join()
+
+    assert errors == [], f"Concurrent writes raised: {errors}"
+
+    # Both writers' rows present
+    with sqlite3.connect(str(db_path)) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM memory_logs").fetchone()[0]
+    assert count == 40
