@@ -1,8 +1,5 @@
 """FTS5 idempotency + WAL regression tests."""
 import sqlite3
-import threading
-import time
-import pytest
 
 from tems.fts5_memory import MemoryDB
 
