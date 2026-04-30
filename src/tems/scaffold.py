@@ -331,11 +331,21 @@ _PHASE3_TEMPLATES = (
     "sdc_commit.py",
 )
 
+# v0.4 Diagnostics & Self-Audit 레이어 —
+# - run_decay_if_due: SessionStart 24h 가드 wrapper (cron 대체)
+# - audit_diagnostics_recent: SessionStart 24h failure 가시화 (α layer)
+# - audit_dead_state: dev tool — 정적 dead-state 검출 (수동 호출, hook 미등록)
+_PHASE4_TEMPLATES = (
+    "run_decay_if_due.py",
+    "audit_diagnostics_recent.py",
+    "audit_dead_state.py",
+)
+
 
 def copy_templates(cwd: Path, force: bool) -> list[str]:
-    """Step 4: 진입점 템플릿 복사 (Phase 2 + Phase 3 포함)."""
+    """Step 4: 진입점 템플릿 복사 (Phase 2 + Phase 3 + v0.4 Diagnostics)."""
     actions = []
-    for filename in _PHASE2_TEMPLATES + _PHASE3_TEMPLATES:
+    for filename in _PHASE2_TEMPLATES + _PHASE3_TEMPLATES + _PHASE4_TEMPLATES:
         src = _get_template_path(filename)
         if not src.exists():
             # 템플릿이 패키지에 포함되지 않은 경우 (구버전 호환)
@@ -350,7 +360,9 @@ def copy_templates(cwd: Path, force: bool) -> list[str]:
     return actions
 
 
-# Phase 3 hook event → script 매핑. matcher 는 빈 문자열로 전체 도구 대상.
+# Phase 3+4 hook event → script 매핑. matcher 는 빈 문자열로 전체 도구 대상.
+# 튜플 4번째 요소 (선택) = command 끝에 붙는 args 문자열 (예: "--silent --hours 24").
+# - SessionStart(startup|resume|clear): decay 24h 가드 + diagnostics α (v0.4)
 # - UserPromptSubmit: preflight 규칙 주입 (Phase 2)
 # - PreToolUse: TGL-T deny/warning (Phase 3)
 # - PostToolUse(ALL): compliance 측정 (Phase 3)
@@ -358,12 +370,14 @@ def copy_templates(cwd: Path, force: bool) -> list[str]:
 # - PostToolUse(Write|Edit): 파일 변경 학습 (Phase 2/3)
 # - Stop: 세션 종료 교훈 추출 (Phase 3)
 _HOOK_PLAN = (
-    ("UserPromptSubmit", "", "preflight_hook.py"),
-    ("PreToolUse", "", "tool_gate_hook.py"),
-    ("PostToolUse", "", "compliance_tracker.py"),
-    ("PostToolUse", "Bash", "tool_failure_hook.py"),
-    ("PostToolUse", "Write|Edit", "memory_bridge.py"),
-    ("Stop", "", "retrospective_hook.py"),
+    ("SessionStart", "startup|resume|clear", "run_decay_if_due.py", ""),
+    ("SessionStart", "startup|resume|clear", "audit_diagnostics_recent.py", "--silent --hours 24"),
+    ("UserPromptSubmit", "", "preflight_hook.py", ""),
+    ("PreToolUse", "", "tool_gate_hook.py", ""),
+    ("PostToolUse", "", "compliance_tracker.py", ""),
+    ("PostToolUse", "Bash", "tool_failure_hook.py", ""),
+    ("PostToolUse", "Write|Edit", "memory_bridge.py", ""),
+    ("Stop", "", "retrospective_hook.py", ""),
 )
 
 
@@ -382,7 +396,13 @@ def register_hook(cwd: Path) -> list[str]:
 
     actions: list[str] = []
 
-    for event, matcher, script in _HOOK_PLAN:
+    for plan_entry in _HOOK_PLAN:
+        # v0.4: 4-tuple 지원 (event, matcher, script, args). 3-tuple 도 후방호환.
+        if len(plan_entry) == 4:
+            event, matcher, script, args = plan_entry
+        else:
+            event, matcher, script = plan_entry
+            args = ""
         # 해당 event 에 해당 script 가 포함된 템플릿이 실제 복사되었는지 확인
         template_path = _get_template_path(script)
         if not template_path.exists():
@@ -391,6 +411,8 @@ def register_hook(cwd: Path) -> list[str]:
             continue
 
         new_command = f'python "{cwd}/memory/{script}"'
+        if args:
+            new_command = f'{new_command} {args}'
         event_entries = hooks.setdefault(event, [])
 
         # matcher 가 같은 entry 를 찾거나 새로 생성
