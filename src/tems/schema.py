@@ -49,6 +49,7 @@ _BASE_TABLES = {
             status_changed_at TEXT DEFAULT (datetime('now')),
             ths_score REAL DEFAULT 0.5,
             ths_updated_at TEXT DEFAULT (datetime('now')),
+            abstraction_level TEXT,
             FOREIGN KEY (rule_id) REFERENCES memory_logs(id)
         )
     """,
@@ -70,31 +71,33 @@ _BASE_TABLES = {
     "meta_rules": """
         CREATE TABLE IF NOT EXISTS meta_rules (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            target_table TEXT NOT NULL,
-            target_field TEXT NOT NULL,
-            old_value TEXT,
-            new_value TEXT,
+            level INTEGER NOT NULL,
+            parameter_name TEXT NOT NULL,
+            old_value REAL,
+            new_value REAL,
             reason TEXT,
+            system_health_before REAL,
+            system_health_after REAL,
             created_at TEXT DEFAULT (datetime('now'))
         )
     """,
     "rule_edges": """
         CREATE TABLE IF NOT EXISTS rule_edges (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
             rule_a INTEGER NOT NULL,
             rule_b INTEGER NOT NULL,
             edge_type TEXT NOT NULL,
-            weight REAL DEFAULT 1.0,
-            created_at TEXT DEFAULT (datetime('now')),
-            UNIQUE(rule_a, rule_b, edge_type)
+            weight REAL DEFAULT 0.0,
+            updated_at TEXT DEFAULT (datetime('now')),
+            valid_from TEXT DEFAULT NULL,
+            valid_until TEXT DEFAULT NULL,
+            PRIMARY KEY (rule_a, rule_b, edge_type)
         )
     """,
     "co_activations": """
         CREATE TABLE IF NOT EXISTS co_activations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            rule_a INTEGER NOT NULL,
-            rule_b INTEGER NOT NULL,
             prompt_hash TEXT NOT NULL,
+            rule_ids TEXT NOT NULL,
             created_at TEXT DEFAULT (datetime('now'))
         )
     """,
@@ -104,7 +107,8 @@ _BASE_TABLES = {
             predecessor_id INTEGER NOT NULL,
             successor_id INTEGER NOT NULL,
             occurrence_count INTEGER DEFAULT 1,
-            created_at TEXT DEFAULT (datetime('now')),
+            confidence REAL DEFAULT 0.0,
+            last_seen TEXT DEFAULT (datetime('now')),
             UNIQUE(predecessor_id, successor_id)
         )
     """,
@@ -123,10 +127,12 @@ _BASE_TABLES = {
         CREATE TABLE IF NOT EXISTS rule_versions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             rule_id INTEGER NOT NULL,
-            version INTEGER NOT NULL,
-            content TEXT NOT NULL,
+            version INTEGER NOT NULL DEFAULT 1,
+            snapshot_json TEXT NOT NULL,
+            changed_fields TEXT DEFAULT '',
+            reason TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now')),
-            UNIQUE(rule_id, version)
+            FOREIGN KEY (rule_id) REFERENCES memory_logs(id)
         )
     """,
     "embedding_meta": """
@@ -231,6 +237,7 @@ def _apply_schema_v1(conn: sqlite3.Connection) -> None:
         ("last_fired", "TEXT", "NULL"),
         ("classification", "TEXT", "NULL"),
         ("needs_review", "INTEGER", "0"),
+        ("abstraction_level", "TEXT", "NULL"),
     ])
     for ddl in _FTS_DDL:
         conn.execute(ddl)
