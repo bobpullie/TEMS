@@ -5,6 +5,7 @@ TEMS Preflight Hook — UserPromptSubmit 자동 트리거 (범용 템플릿)
 preflight 검색을 수행합니다.
 """
 
+import os
 import sys
 import json
 import re
@@ -18,21 +19,63 @@ from tems.korean_utils import strip_korean_suffix
 
 
 def find_agent_root(start: Path) -> Path:
-    """상위 순회하며 .claude/tems_agent_id 찾기 (.git 탐색과 동일 패턴)"""
-    cur = start.resolve()
-    while cur != cur.parent:
-        marker = cur / ".claude" / "tems_agent_id"
-        if marker.exists():
-            return cur
-        cur = cur.parent
-    raise FileNotFoundError("tems_agent_id not found from " + str(start))
+    """AGENT_ROOT 해상 — env var > cwd walk > __file__ walk > error.
+
+    Why: 종전 ``find_agent_root`` 는 ``start`` (=__file__ parent) 부터만 ancestors
+    walk 했음. canonical site-packages install 시 ``start`` 가
+    ``.../site-packages/tems/templates`` 라 marker 못 찾고 무조건 fail.
+    5-Asset 4원칙 #4 Universal Portability 위반 (위상군 인계, 2026-04-30).
+
+    PR #19 의 ``_resolve_qmd_cmd`` 와 대칭 패턴 — 다단 해상으로 일반화:
+
+    1. ``TEMS_AGENT_ROOT`` env var — 사용자 명시 절대경로. site-packages
+       canonical install 시 유일한 결정적 해법.
+    2. ``Path.cwd()`` 부터 위로 walk — 일반 CLI 호출 직관.
+    3. ``start`` (=__file__ parent) 부터 위로 walk — v0.4 backward compat
+       (editable-in-project install).
+    4. 모두 실패 → ``FileNotFoundError`` (시도 anchor 명시).
+
+    env 박혔는데 marker 없으면 fallback 으로 silent 넘기지 않고 즉시 raise —
+    silent wrong-agent-root migration 방지.
+    """
+    env = os.environ.get("TEMS_AGENT_ROOT")
+    if env:
+        root = Path(env).resolve()
+        if (root / ".claude" / "tems_agent_id").exists():
+            return root
+        raise FileNotFoundError(
+            f"TEMS_AGENT_ROOT={env} but .claude/tems_agent_id not found there"
+        )
+
+    for anchor in (Path.cwd(), start.resolve()):
+        cur = anchor
+        while cur != cur.parent:
+            if (cur / ".claude" / "tems_agent_id").exists():
+                return cur
+            cur = cur.parent
+
+    raise FileNotFoundError(
+        "tems_agent_id not found via TEMS_AGENT_ROOT env, cwd walk, or "
+        f"__file__ walk (start={start})"
+    )
 
 
-# 에이전트 자기 식별
-AGENT_ROOT = find_agent_root(Path(__file__).resolve().parent)  # v0.4: cwd 비의존
-AGENT_ID = (AGENT_ROOT / ".claude" / "tems_agent_id").read_text(encoding="utf-8").strip()
-DB_PATH = AGENT_ROOT / "memory" / "error_logs.db"
-import os
+# 에이전트 자기 식별 — module load 시 1회 시도. canonical site-packages
+# 환경 (env 부재 + cwd marker 밖) 에서는 None 으로 두고 main() 진입 시 재시도.
+# import 자체는 항상 통과 — helper 재사용/패키지 import 가 fail 하지 않도록.
+def _resolve_agent_root():
+    try:
+        return find_agent_root(Path(__file__).resolve().parent)
+    except FileNotFoundError:
+        return None
+
+
+AGENT_ROOT = _resolve_agent_root()  # Optional[Path]
+AGENT_ID = (
+    (AGENT_ROOT / ".claude" / "tems_agent_id").read_text(encoding="utf-8").strip()
+    if AGENT_ROOT is not None else None
+)
+DB_PATH = (AGENT_ROOT / "memory" / "error_logs.db") if AGENT_ROOT is not None else None
 _reg_env = os.environ.get("TEMS_REGISTRY_PATH")
 REGISTRY_PATH = Path(_reg_env) if _reg_env else None
 
@@ -45,6 +88,8 @@ def _log_diagnostic(event: str, exc: BaseException) -> None:
     ``audit_diagnostics_recent`` (SessionStart α layer) 가 자동 표시.
     경로/형식은 ``audit_diagnostics_recent._log_diagnostic`` 와 동일.
     """
+    if AGENT_ROOT is None:
+        return  # import-only context — nowhere to persist
     try:
         log_path = AGENT_ROOT / "memory" / "tems_diagnostics.jsonl"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -385,6 +430,21 @@ def detect_rule_intent(prompt: str) -> str | None:
 
 
 def main():
+    global AGENT_ROOT, AGENT_ID, DB_PATH
+    # Lazy resolve at hook execution time — module load 가 site-packages
+    # canonical install 환경에서 None 으로 끝났을 수 있음. hook 실행 시점의
+    # cwd / env 가 marker 를 가리키면 여기서 성공.
+    if AGENT_ROOT is None:
+        try:
+            AGENT_ROOT = find_agent_root(Path(__file__).resolve().parent)
+            AGENT_ID = (AGENT_ROOT / ".claude" / "tems_agent_id").read_text(encoding="utf-8").strip()
+            DB_PATH = AGENT_ROOT / "memory" / "error_logs.db"
+        except FileNotFoundError:
+            # hook 본체 fail 경로 진입 — outer try/except 가 진단 emit 시도
+            # (하지만 _log_diagnostic 도 AGENT_ROOT None 시 no-op 이므로
+            # 실질적으로 silent. agent 환경 외부에서 hook 직접 실행은
+            # configuration error 로 정상.)
+            sys.exit(0)
     try:
         # stdin에서 hook 데이터 읽기
         raw = sys.stdin.read()
