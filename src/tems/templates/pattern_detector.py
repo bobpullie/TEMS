@@ -19,7 +19,7 @@ from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
 
-MEMORY_DIR = Path(__file__).parent
+MEMORY_DIR = Path(__file__).resolve().parent  # v0.4: cwd 비의존
 TOOL_FAILURES = MEMORY_DIR / "tool_failures.jsonl"
 TEMS_DIAGNOSTICS = MEMORY_DIR / "tems_diagnostics.jsonl"
 DB_PATH = MEMORY_DIR / "error_logs.db"

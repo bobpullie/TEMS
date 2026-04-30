@@ -18,7 +18,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-MEMORY_DIR = Path(__file__).parent
+MEMORY_DIR = Path(__file__).resolve().parent  # v0.4: cwd 비의존
 LOG_PATH = MEMORY_DIR / "tool_failures.jsonl"
 
 # 실패 시그니처 — 우선순위 높은 순. (regex_pattern, signature_label, severity)

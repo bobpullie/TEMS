@@ -24,7 +24,7 @@ def find_agent_root(start: Path) -> Path:
     raise FileNotFoundError("tems_agent_id not found from " + str(start))
 
 
-AGENT_ROOT = find_agent_root(Path(__file__).parent)
+AGENT_ROOT = find_agent_root(Path(__file__).resolve().parent)  # v0.4: cwd 비의존
 AGENT_ID = (AGENT_ROOT / ".claude" / "tems_agent_id").read_text(encoding="utf-8").strip()
 DB_PATH = str(AGENT_ROOT / "memory" / "error_logs.db")
 QMD_RULES_DIR = AGENT_ROOT / "memory" / "qmd_rules"

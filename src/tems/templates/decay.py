@@ -28,7 +28,7 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-MEMORY_DIR = Path(__file__).parent
+MEMORY_DIR = Path(__file__).resolve().parent  # v0.4: cwd 비의존
 DB_PATH = MEMORY_DIR / "error_logs.db"
 DIAG_PATH = MEMORY_DIR / "tems_diagnostics.jsonl"
 
