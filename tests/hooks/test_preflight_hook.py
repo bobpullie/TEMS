@@ -14,14 +14,6 @@ Hook contract (verified from src/tems/templates/preflight_hook.py):
   tests to tmp_path segment heuristics.
 - Silent if no hits: format_rules() returns "" -> nothing printed -> empty stdout
   -> run_hook() returns {}.
-
-Known bug: on Windows, conftest.run_hook() uses subprocess.run(..., text=True) which
-defaults to the system encoding (cp949). The hook's format_rules() emits a hardcoded
-Korean header "[TGL] 필수 준수 ..." as UTF-8. This causes a UnicodeDecodeError in the
-subprocess reader thread on Windows, resulting in result.stdout=None and an
-AttributeError in conftest.py line 61. test_preflight_injects_matching_tgl is
-marked xfail until conftest or the hook template is fixed (encoding="utf-8" in
-subprocess.run, or the Korean header is removed/replaced).
 """
 from tests.hooks.conftest import run_hook, insert_rule
 
@@ -34,8 +26,6 @@ def test_preflight_injects_matching_tgl(agent_dir):
     dependence on tmp_path segment heuristics. The keyword_trigger contains
     "useEffect" and "closure" which appear verbatim in the prompt after
     extract_keywords() stopword removal, ensuring BM25 prefix match.
-
-    xfail reason: Windows cp949/UTF-8 encoding mismatch in conftest.run_hook.
     """
     rid = insert_rule(
         agent_dir,
@@ -96,11 +86,11 @@ def test_preflight_silent_below_threshold(agent_dir):
 
 
 def test_preflight_never_blocks(agent_dir):
-    """Even with a malformed/empty event, hook must exit 0.
+    """Empty event must produce zero output and exit 0.
 
-    run_hook() asserts returncode == 0 internally; reaching the isinstance
-    check means the hook did not crash or block the harness.
+    Source: preflight_hook.main() bails at `if not prompt.strip(): sys.exit(0)`
+    before any DB access — empty event guarantees stdout is empty.
+    run_hook() asserts returncode == 0 internally.
     """
-    out = run_hook(agent_dir, "preflight_hook.py", {})  # missing all fields
-    # run_hook's internal assert already validated exit code 0.
-    assert isinstance(out, dict)
+    out = run_hook(agent_dir, "preflight_hook.py", {})
+    assert out == {}, f"Empty event should produce no output, got: {out}"
