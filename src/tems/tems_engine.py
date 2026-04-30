@@ -25,7 +25,15 @@ from pathlib import Path
 from typing import Optional
 from math import log
 
-from .fts5_memory import MemoryDB
+# v0.4: 직접 실행 호환 (`python src/tems/tems_engine.py`).
+# top-level relative import 는 __main__ 컨텍스트에서 parent package 부재로 ImportError.
+# sys.path 보강 후 absolute import 로 전환 — 정상 사용 경로 (`python -m tems.tems_engine`,
+# `from tems.tems_engine import ...`, pytest) 영향 0.
+_PACKAGE_ROOT = str(Path(__file__).resolve().parent.parent)
+if _PACKAGE_ROOT not in sys.path:
+    sys.path.insert(0, _PACKAGE_ROOT)
+
+from tems.fts5_memory import MemoryDB
 
 DB_PATH = None  # 외부에서 주입
 QMD_RULES_DIR = None  # 외부에서 주입
