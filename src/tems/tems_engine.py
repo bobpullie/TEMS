@@ -15,6 +15,7 @@ Evolution 4: Temporal Graph — Graphiti 기반 시간축 지식 그래프
 """
 
 import json
+import hashlib
 import subprocess
 import shutil
 import sys
@@ -1075,7 +1076,11 @@ class RuleGraph:
         if len(triggered_rule_ids) < 2:
             return
 
-        prompt_hash = str(hash(prompt))[:16]
+        # 5-Asset audit M1 — Python builtin hash() 는 PEP 456 의 process-local
+        # randomized salt 라 process 재시작마다 같은 prompt 가 다른 값. DB 의
+        # co_activations.prompt_hash 컬럼이 사실상 무의미해짐. sha1 hexdigest
+        # 로 deterministic 보장 (cryptographic 강도 불요 — collision 회피 목적).
+        prompt_hash = hashlib.sha1(prompt.encode("utf-8")).hexdigest()[:16]
         ids_str = ",".join(str(i) for i in sorted(triggered_rule_ids))
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
