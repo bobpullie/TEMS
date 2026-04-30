@@ -39,3 +39,26 @@ def test_trigger_misses_schema_unified(tmp_path):
     assert expected.issubset(cols), (
         f"trigger_misses missing columns: {expected - cols}"
     )
+
+
+def test_adaptive_trigger_record_miss_works(tmp_path):
+    """Regression: AdaptiveTrigger.record_miss crashed with OperationalError
+    on fresh scaffold because trigger_misses had wrong column names.
+    Now lands as part of the Critical #1 fix verification."""
+    from tems.fts5_memory import MemoryDB
+    from tems.tems_engine import AdaptiveTrigger
+    from tems.scaffold import _create_tables
+
+    db_path = tmp_path / "smoke.db"
+    # Simulate scaffold-first ordering (real production flow)
+    _create_tables(str(db_path))
+    db = MemoryDB(str(db_path))
+    trig = AdaptiveTrigger(db)
+    # Should NOT raise — was OperationalError before A1-A5 chain
+    trig.record_miss(
+        prompt="some unmatched user prompt",
+        missed_keywords=["foo", "bar"],
+        rule_id=None,
+    )
+    stats = trig.get_miss_stats()
+    assert stats["total_misses"] == 1

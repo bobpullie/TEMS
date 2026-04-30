@@ -234,6 +234,8 @@ def _apply_schema_v1(conn: sqlite3.Connection) -> None:
         ("summary", "TEXT", "''"),
         ("embedding", "BLOB", "NULL"),
         ("superseded_by", "TEXT", "NULL"),
+        ("valid_from", "TEXT", "NULL"),
+        ("valid_until", "TEXT", "NULL"),
     ])
     _add_missing_columns(conn, "rule_health", [
         ("fire_count", "INTEGER", "0"),
