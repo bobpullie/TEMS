@@ -8,7 +8,8 @@ preflight 검색을 수행합니다.
 import sys
 import json
 import re
-from datetime import datetime, timezone
+import traceback
+from datetime import datetime
 from pathlib import Path
 
 from tems.fts5_memory import MemoryDB
@@ -36,22 +37,24 @@ _reg_env = os.environ.get("TEMS_REGISTRY_PATH")
 REGISTRY_PATH = Path(_reg_env) if _reg_env else None
 
 
-def _log_diagnostic(error_type: str, exc: BaseException) -> None:
+def _log_diagnostic(event: str, exc: BaseException) -> None:
     """preflight hook 내부 silent fail 진단 로그.
 
     Why: bare ``except: pass`` 가 4 사이트에 존재해 hook 비정상 동작이 사용자에게
-    invisible. JSONL append 로 사후 분석 가능하게 함. 진단 자체 실패는 hook 본체
-    실행을 방해하지 않도록 무시.
+    invisible. ``memory/tems_diagnostics.jsonl`` 에 append 하여 기존
+    ``audit_diagnostics_recent`` (SessionStart α layer) 가 자동 표시.
+    경로/형식은 ``audit_diagnostics_recent._log_diagnostic`` 와 동일.
     """
     try:
-        log_path = AGENT_ROOT / "logs" / "preflight_diagnostic.jsonl"
+        log_path = AGENT_ROOT / "memory" / "tems_diagnostics.jsonl"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps({
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "error_type": error_type,
-                "exception": type(exc).__name__,
-                "message": str(exc),
+                "timestamp": datetime.now().isoformat(),
+                "event": event,
+                "exc_type": type(exc).__name__,
+                "exc_msg": str(exc)[:300],
+                "traceback": traceback.format_exc()[-800:],
             }, ensure_ascii=False) + "\n")
     except Exception:
         pass
