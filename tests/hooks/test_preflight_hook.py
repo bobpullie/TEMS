@@ -16,6 +16,9 @@ Hook contract (verified from src/tems/templates/preflight_hook.py):
   -> run_hook() returns {}.
 """
 import json
+import os
+import subprocess
+import sys
 
 from tests.hooks.conftest import run_hook, insert_rule
 
@@ -105,7 +108,9 @@ def test_preflight_outermost_failure_writes_diagnostic(agent_dir):
     Force a hook crash by replacing memory/error_logs.db with a directory —
     sqlite3.connect() will then raise inside EnhancedPreflight, propagating to
     the outermost try in main(). We assert a row lands in
-    logs/preflight_diagnostic.jsonl with error_type=preflight_failure.
+    memory/tems_diagnostics.jsonl using the same shape as
+    audit_diagnostics_recent (event/exc_type/exc_msg/traceback) so the existing
+    SessionStart α-layer auto-surfaces it.
     """
     db_path = agent_dir / "memory" / "error_logs.db"
     if db_path.exists():
@@ -123,11 +128,37 @@ def test_preflight_outermost_failure_writes_diagnostic(agent_dir):
     # Hook must still exit 0 (run_hook asserts) and produce no stdout.
     assert out == {}, f"Failed hook must stay silent on stdout, got: {out}"
 
-    diag_path = agent_dir / "logs" / "preflight_diagnostic.jsonl"
+    diag_path = agent_dir / "memory" / "tems_diagnostics.jsonl"
     assert diag_path.exists(), (
         f"Expected diagnostic log at {diag_path}, hook silently swallowed failure"
     )
     rows = [json.loads(line) for line in diag_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert any(r.get("error_type") == "preflight_failure" for r in rows), (
-        f"No preflight_failure row in diagnostic log, got: {rows}"
+    matches = [r for r in rows if r.get("event") == "preflight_failure"]
+    assert matches, f"No preflight_failure row in diagnostic log, got: {rows}"
+    row = matches[-1]
+    # Shape parity with audit_diagnostics_recent._log_diagnostic
+    assert "timestamp" in row and "exc_type" in row and "exc_msg" in row and "traceback" in row, (
+        f"Diagnostic row missing audit-compatible keys, got: {row}"
+    )
+
+    # End-to-end: the existing audit_diagnostics_recent SessionStart hook must
+    # auto-surface the row written above. This is what makes Option-A real —
+    # if format/path drifts again, this assertion catches it.
+    audit_path = agent_dir / "memory" / "audit_diagnostics_recent.py"
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env.pop("TEMS_REGISTRY_PATH", None)
+    env.pop("TEMS_MEMORY_DIR", None)
+    audit_run = subprocess.run(
+        [sys.executable, str(audit_path)],
+        capture_output=True, text=True, timeout=10.0,
+        cwd=str(agent_dir), env=env, encoding="utf-8",
+    )
+    assert audit_run.returncode == 0, (
+        f"audit_diagnostics_recent exited {audit_run.returncode}\n"
+        f"STDERR: {audit_run.stderr}"
+    )
+    assert "preflight_failure" in audit_run.stdout, (
+        f"audit_diagnostics_recent did not surface preflight_failure row.\n"
+        f"STDOUT: {audit_run.stdout!r}"
     )
