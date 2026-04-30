@@ -35,82 +35,9 @@ class MemoryDB:
         self._init_db()
 
     def _init_db(self):
+        from tems.schema import apply_schema
         with self._conn() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS memory_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    context_tags TEXT NOT NULL,
-                    keyword_trigger TEXT DEFAULT '',
-                    action_taken TEXT NOT NULL,
-                    result TEXT NOT NULL,
-                    correction_rule TEXT,
-                    category TEXT DEFAULT 'general',
-                    severity TEXT DEFAULT 'info',
-                    created_at TEXT DEFAULT (datetime('now'))
-                )
-            """)
-
-            for col, col_type, default in [
-                ("keyword_trigger", "TEXT", "''"),
-                ("summary", "TEXT", "''"),
-                ("embedding", "BLOB", "NULL"),
-            ]:
-                try:
-                    conn.execute(
-                        f"ALTER TABLE memory_logs ADD COLUMN {col} {col_type} DEFAULT {default}"
-                    )
-                except sqlite3.OperationalError:
-                    pass
-
-            conn.execute("DROP TABLE IF EXISTS memory_fts")
-            conn.execute("DROP TRIGGER IF EXISTS memory_ai")
-            conn.execute("DROP TRIGGER IF EXISTS memory_ad")
-            conn.execute("DROP TRIGGER IF EXISTS memory_au")
-
-            conn.execute("""
-                CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-                    context_tags,
-                    keyword_trigger,
-                    action_taken,
-                    result,
-                    correction_rule,
-                    category,
-                    content=memory_logs,
-                    content_rowid=id,
-                    tokenize='unicode61'
-                )
-            """)
-
-            conn.execute("""
-                INSERT INTO memory_fts(rowid, context_tags, keyword_trigger, action_taken, result, correction_rule, category)
-                SELECT id, context_tags, COALESCE(keyword_trigger, ''), action_taken, result, correction_rule, category
-                FROM memory_logs
-            """)
-
-            conn.execute("""
-                CREATE TRIGGER IF NOT EXISTS memory_ai AFTER INSERT ON memory_logs BEGIN
-                    INSERT INTO memory_fts(rowid, context_tags, keyword_trigger, action_taken, result, correction_rule, category)
-                    VALUES (new.id, new.context_tags, new.keyword_trigger, new.action_taken, new.result, new.correction_rule, new.category);
-                END
-            """)
-
-            conn.execute("""
-                CREATE TRIGGER IF NOT EXISTS memory_ad AFTER DELETE ON memory_logs BEGIN
-                    INSERT INTO memory_fts(memory_fts, rowid, context_tags, keyword_trigger, action_taken, result, correction_rule, category)
-                    VALUES ('delete', old.id, old.context_tags, old.keyword_trigger, old.action_taken, old.result, old.correction_rule, old.category);
-                END
-            """)
-
-            conn.execute("""
-                CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory_logs BEGIN
-                    INSERT INTO memory_fts(memory_fts, rowid, context_tags, keyword_trigger, action_taken, result, correction_rule, category)
-                    VALUES ('delete', old.id, old.context_tags, old.keyword_trigger, old.action_taken, old.result, old.correction_rule, old.category);
-                    INSERT INTO memory_fts(rowid, context_tags, keyword_trigger, action_taken, result, correction_rule, category)
-                    VALUES (new.id, new.context_tags, new.keyword_trigger, new.action_taken, new.result, new.correction_rule, new.category);
-                END
-            """)
-
+            apply_schema(conn)
             conn.commit()
 
     def _conn(self) -> sqlite3.Connection:

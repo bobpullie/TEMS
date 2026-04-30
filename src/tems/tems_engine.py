@@ -16,7 +16,6 @@ Evolution 4: Temporal Graph — Graphiti 기반 시간축 지식 그래프
 
 import json
 import subprocess
-import sqlite3
 import shutil
 import sys
 import os
@@ -321,23 +320,9 @@ class HealthScorer:
 
     def _ensure_ths_table(self):
         """THS 메타데이터 테이블 생성"""
+        from tems.schema import apply_schema
         with self.db._conn() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS rule_health (
-                    rule_id INTEGER PRIMARY KEY,
-                    activation_count INTEGER DEFAULT 0,
-                    correction_success INTEGER DEFAULT 0,
-                    correction_total INTEGER DEFAULT 0,
-                    modification_count INTEGER DEFAULT 0,
-                    last_activated TEXT,
-                    last_modified TEXT,
-                    status TEXT DEFAULT 'warm',
-                    status_changed_at TEXT DEFAULT (datetime('now')),
-                    ths_score REAL DEFAULT 0.5,
-                    ths_updated_at TEXT DEFAULT (datetime('now')),
-                    FOREIGN KEY (rule_id) REFERENCES memory_logs(id)
-                )
-            """)
+            apply_schema(conn)
             conn.commit()
 
     def record_activation(self, rule_id: int, prevented_error: bool = False):
@@ -579,22 +564,9 @@ class AnomalyCertifier:
 
     def _ensure_exception_table(self):
         """예외 관리 테이블 생성"""
+        from tems.schema import apply_schema
         with self.db._conn() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS exceptions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    rule_id INTEGER,
-                    exception_type TEXT NOT NULL,
-                    description TEXT NOT NULL,
-                    occurrence_count INTEGER DEFAULT 1,
-                    persistence_score REAL DEFAULT 0.0,
-                    created_at TEXT DEFAULT (datetime('now')),
-                    last_seen TEXT DEFAULT (datetime('now')),
-                    status TEXT DEFAULT 'active',
-                    promoted_to_rule_id INTEGER,
-                    FOREIGN KEY (rule_id) REFERENCES memory_logs(id)
-                )
-            """)
+            apply_schema(conn)
             conn.commit()
 
     def classify_exception(
@@ -793,20 +765,9 @@ class MetaRuleEngine:
 
     def _ensure_meta_table(self):
         """메타규칙 이력 테이블"""
+        from tems.schema import apply_schema
         with self.db._conn() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS meta_rules (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    level INTEGER NOT NULL,
-                    parameter_name TEXT NOT NULL,
-                    old_value REAL,
-                    new_value REAL,
-                    reason TEXT,
-                    system_health_before REAL,
-                    system_health_after REAL,
-                    created_at TEXT DEFAULT (datetime('now'))
-                )
-            """)
+            apply_schema(conn)
             conn.commit()
 
     def compute_system_health(self) -> dict:
@@ -1011,28 +972,9 @@ class RuleGraph:
 
     def _ensure_graph_tables(self):
         """그래프 엣지 + 공동 활성화 이력 테이블"""
+        from tems.schema import apply_schema
         with self.db._conn() as conn:
-            # 규칙 간 엣지 (가중치 그래프)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS rule_edges (
-                    rule_a INTEGER NOT NULL,
-                    rule_b INTEGER NOT NULL,
-                    edge_type TEXT NOT NULL,
-                    weight REAL DEFAULT 0.0,
-                    updated_at TEXT DEFAULT (datetime('now')),
-                    PRIMARY KEY (rule_a, rule_b, edge_type)
-                )
-            """)
-
-            # 공동 활성화 이력 (어떤 규칙들이 같은 프롬프트에서 함께 트리거되었는가)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS co_activations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    prompt_hash TEXT NOT NULL,
-                    rule_ids TEXT NOT NULL,
-                    created_at TEXT DEFAULT (datetime('now'))
-                )
-            """)
+            apply_schema(conn)
             conn.commit()
 
     def build_keyword_edges(self):
@@ -1184,18 +1126,9 @@ class PredictiveTGL:
 
     def _ensure_sequence_table(self):
         """TGL 시퀀스 패턴 테이블"""
+        from tems.schema import apply_schema
         with self.db._conn() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS tgl_sequences (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    predecessor_id INTEGER NOT NULL,
-                    successor_id INTEGER NOT NULL,
-                    occurrence_count INTEGER DEFAULT 1,
-                    confidence REAL DEFAULT 0.0,
-                    last_seen TEXT DEFAULT (datetime('now')),
-                    UNIQUE(predecessor_id, successor_id)
-                )
-            """)
+            apply_schema(conn)
             conn.commit()
 
     def record_tgl_event(self, tgl_rule_id: int):
@@ -1299,18 +1232,9 @@ class AdaptiveTrigger:
 
     def _ensure_miss_table(self):
         """미매칭 기록 테이블"""
+        from tems.schema import apply_schema
         with self.db._conn() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS trigger_misses (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    prompt_text TEXT NOT NULL,
-                    missed_keywords TEXT NOT NULL,
-                    should_have_matched_rule_id INTEGER NOT NULL,
-                    was_expanded INTEGER DEFAULT 0,
-                    created_at TEXT DEFAULT (datetime('now')),
-                    FOREIGN KEY (should_have_matched_rule_id) REFERENCES memory_logs(id)
-                )
-            """)
+            apply_schema(conn)
             conn.commit()
 
     def record_miss(self, prompt: str, missed_keywords: list[str], rule_id: int):
@@ -1462,53 +1386,15 @@ class TemporalGraph:
 
     def _ensure_temporal_tables(self):
         """시간축 테이블 및 컬럼 생성"""
+        from tems.schema import apply_schema
         with self.db._conn() as conn:
-            # memory_logs에 temporal 컬럼 추가 (마이그레이션)
-            for col, default in [
-                ("valid_from", "NULL"),
-                ("valid_until", "NULL"),
-                ("superseded_by", "NULL"),
-            ]:
-                try:
-                    conn.execute(
-                        f"ALTER TABLE memory_logs ADD COLUMN {col} TEXT DEFAULT {default}"
-                    )
-                except sqlite3.OperationalError:
-                    pass  # 이미 존재
-
-            # rule_edges에도 temporal 컬럼 추가
-            for col, default in [
-                ("valid_from", "NULL"),
-                ("valid_until", "NULL"),
-            ]:
-                try:
-                    conn.execute(
-                        f"ALTER TABLE rule_edges ADD COLUMN {col} TEXT DEFAULT {default}"
-                    )
-                except sqlite3.OperationalError:
-                    pass
-
-            # 규칙 버전 이력 테이블
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS rule_versions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    rule_id INTEGER NOT NULL,
-                    version INTEGER NOT NULL DEFAULT 1,
-                    snapshot_json TEXT NOT NULL,
-                    changed_fields TEXT DEFAULT '',
-                    reason TEXT DEFAULT '',
-                    created_at TEXT DEFAULT (datetime('now')),
-                    FOREIGN KEY (rule_id) REFERENCES memory_logs(id)
-                )
-            """)
-
+            apply_schema(conn)
             # valid_from이 NULL인 기존 규칙들을 created_at으로 백필
             conn.execute("""
                 UPDATE memory_logs
                 SET valid_from = created_at
                 WHERE valid_from IS NULL AND created_at IS NOT NULL
             """)
-
             conn.commit()
 
     # ─── Rule Supersession (규칙 대체) ───

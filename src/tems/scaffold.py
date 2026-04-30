@@ -63,229 +63,24 @@ def create_directories(cwd: Path) -> list[str]:
     return actions
 
 
-# Phase 3 rule_health 추가 컬럼 (Phase 2 → Phase 3 마이그레이션 대상).
-# 기존 DB 에 누락 시 ALTER TABLE ADD COLUMN 으로 보충.
-_RULE_HEALTH_PHASE3_COLUMNS = (
-    ("fire_count", "INTEGER DEFAULT 0"),
-    ("last_fired", "TEXT"),
-    ("compliance_count", "INTEGER DEFAULT 0"),
-    ("violation_count", "INTEGER DEFAULT 0"),
-    ("created_at", "TEXT"),
-    ("classification", "TEXT"),
-    ("abstraction_level", "TEXT"),
-    ("needs_review", "INTEGER DEFAULT 0"),
-)
-
-
-def _migrate_rule_health(db_path: str) -> list[str]:
-    """Phase 2 → Phase 3 in-place 컬럼 마이그레이션. 기존 데이터 보존."""
-    conn = sqlite3.connect(db_path)
-    try:
-        existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(rule_health)").fetchall()}
-    except sqlite3.OperationalError:
-        # rule_health 테이블 자체가 없는 경우 — 호출자가 _create_tables 로 처리
-        conn.close()
-        return []
-    added = []
-    for col, ddl in _RULE_HEALTH_PHASE3_COLUMNS:
-        if col not in existing_cols:
-            conn.execute(f"ALTER TABLE rule_health ADD COLUMN {col} {ddl}")
-            added.append(col)
-    if added:
-        conn.commit()
-    conn.close()
-    return added
-
-
 def create_database(cwd: Path, force: bool) -> str:
-    """Step 3: error_logs.db 전체 스키마 생성 (Phase 2 → Phase 3 마이그레이션 포함)."""
+    """Step 3: error_logs.db 전체 스키마 생성 (apply_schema 위임, 멱등)."""
     db_path = cwd / "memory" / "error_logs.db"
 
     if db_path.exists() and not force:
-        # 스키마 검증 — 누락 테이블 + Phase 3 rule_health 컬럼 보충
-        conn = sqlite3.connect(str(db_path))
-        tables = [r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()]
-        conn.close()
-        required = {"memory_logs", "rule_health", "exceptions", "meta_rules",
-                     "rule_edges", "co_activations", "tgl_sequences", "trigger_misses", "rule_versions"}
-        missing = required - set(tables)
-        if missing:
-            _create_tables(str(db_path), only_missing=missing)
-        # Phase 3 컬럼 마이그레이션 — rule_health 가 존재하는 경우
-        added_cols = _migrate_rule_health(str(db_path))
-        if missing and added_cols:
-            return "db_schema_updated_and_migrated"
-        if missing:
-            return "db_schema_updated"
-        if added_cols:
-            return "db_phase3_columns_added"
+        _create_tables(str(db_path))
         return "db_exists"
 
     _create_tables(str(db_path))
     return "db_created"
 
 
-def _create_tables(db_path: str, only_missing: set = None):
-    """전체 TEMS 스키마 생성"""
+def _create_tables(db_path: str, only_missing=None):
+    """Apply consolidated schema. only_missing is now a no-op kept for API compat
+    — apply_schema() is fully idempotent and migrations handle missing columns."""
+    from .schema import apply_schema
     conn = sqlite3.connect(db_path)
-
-    schemas = {
-        "memory_logs": """
-            CREATE TABLE IF NOT EXISTS memory_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                context_tags TEXT NOT NULL,
-                keyword_trigger TEXT DEFAULT '',
-                action_taken TEXT NOT NULL,
-                result TEXT NOT NULL,
-                correction_rule TEXT,
-                category TEXT DEFAULT 'general',
-                severity TEXT DEFAULT 'info',
-                summary TEXT DEFAULT '',
-                created_at TEXT DEFAULT (datetime('now'))
-            )
-        """,
-        "rule_health": """
-            CREATE TABLE IF NOT EXISTS rule_health (
-                rule_id INTEGER PRIMARY KEY,
-                activation_count INTEGER DEFAULT 0,
-                correction_success INTEGER DEFAULT 0,
-                correction_total INTEGER DEFAULT 0,
-                modification_count INTEGER DEFAULT 0,
-                last_activated TEXT,
-                last_modified TEXT,
-                status TEXT DEFAULT 'warm',
-                status_changed_at TEXT DEFAULT (datetime('now')),
-                ths_score REAL DEFAULT 0.5,
-                ths_updated_at TEXT DEFAULT (datetime('now')),
-                fire_count INTEGER DEFAULT 0,
-                last_fired TEXT,
-                compliance_count INTEGER DEFAULT 0,
-                violation_count INTEGER DEFAULT 0,
-                created_at TEXT,
-                classification TEXT,
-                abstraction_level TEXT,
-                needs_review INTEGER DEFAULT 0,
-                FOREIGN KEY (rule_id) REFERENCES memory_logs(id)
-            )
-        """,
-        "exceptions": """
-            CREATE TABLE IF NOT EXISTS exceptions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                rule_id INTEGER,
-                exception_type TEXT NOT NULL,
-                description TEXT NOT NULL,
-                occurrence_count INTEGER DEFAULT 1,
-                persistence_score REAL DEFAULT 0.0,
-                created_at TEXT DEFAULT (datetime('now')),
-                last_seen TEXT DEFAULT (datetime('now')),
-                status TEXT DEFAULT 'active',
-                promoted_to_rule_id INTEGER,
-                FOREIGN KEY (rule_id) REFERENCES memory_logs(id)
-            )
-        """,
-        "meta_rules": """
-            CREATE TABLE IF NOT EXISTS meta_rules (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                level INTEGER NOT NULL,
-                parameter_name TEXT NOT NULL,
-                old_value REAL,
-                new_value REAL,
-                reason TEXT,
-                system_health_before REAL,
-                system_health_after REAL,
-                created_at TEXT DEFAULT (datetime('now'))
-            )
-        """,
-        "rule_edges": """
-            CREATE TABLE IF NOT EXISTS rule_edges (
-                rule_a INTEGER NOT NULL,
-                rule_b INTEGER NOT NULL,
-                edge_type TEXT NOT NULL,
-                weight REAL DEFAULT 0.0,
-                updated_at TEXT DEFAULT (datetime('now')),
-                PRIMARY KEY (rule_a, rule_b, edge_type)
-            )
-        """,
-        "co_activations": """
-            CREATE TABLE IF NOT EXISTS co_activations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                prompt_hash TEXT NOT NULL,
-                rule_ids TEXT NOT NULL,
-                created_at TEXT DEFAULT (datetime('now'))
-            )
-        """,
-        "tgl_sequences": """
-            CREATE TABLE IF NOT EXISTS tgl_sequences (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                predecessor_id INTEGER NOT NULL,
-                successor_id INTEGER NOT NULL,
-                occurrence_count INTEGER DEFAULT 1,
-                confidence REAL DEFAULT 0.0,
-                last_seen TEXT DEFAULT (datetime('now')),
-                UNIQUE(predecessor_id, successor_id)
-            )
-        """,
-        "trigger_misses": """
-            CREATE TABLE IF NOT EXISTS trigger_misses (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                query TEXT NOT NULL,
-                expected_rule_id INTEGER,
-                timestamp TEXT DEFAULT (datetime('now'))
-            )
-        """,
-        "rule_versions": """
-            CREATE TABLE IF NOT EXISTS rule_versions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                rule_id INTEGER NOT NULL,
-                field_changed TEXT NOT NULL,
-                old_value TEXT,
-                new_value TEXT,
-                timestamp TEXT DEFAULT (datetime('now')),
-                FOREIGN KEY (rule_id) REFERENCES memory_logs(id)
-            )
-        """,
-    }
-
-    for name, ddl in schemas.items():
-        if only_missing is None or name in only_missing:
-            conn.execute(ddl)
-
-    # FTS5 가상 테이블 (memory_logs 기반) — summary 컬럼 포함 (Phase 2A+)
-    if only_missing is None or "memory_fts" in only_missing:
-        conn.execute("DROP TABLE IF EXISTS memory_fts")
-        conn.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-                context_tags, keyword_trigger, action_taken, result,
-                correction_rule, category, summary,
-                content=memory_logs, content_rowid=id,
-                tokenize='unicode61'
-            )
-        """)
-        # 동기화 트리거
-        conn.execute("""
-            CREATE TRIGGER IF NOT EXISTS memory_ai AFTER INSERT ON memory_logs BEGIN
-                INSERT INTO memory_fts(rowid, context_tags, keyword_trigger, action_taken, result, correction_rule, category, summary)
-                VALUES (new.id, new.context_tags, new.keyword_trigger, new.action_taken, new.result, new.correction_rule, new.category, new.summary);
-            END
-        """)
-        conn.execute("""
-            CREATE TRIGGER IF NOT EXISTS memory_ad AFTER DELETE ON memory_logs BEGIN
-                INSERT INTO memory_fts(memory_fts, rowid, context_tags, keyword_trigger, action_taken, result, correction_rule, category, summary)
-                VALUES ('delete', old.id, old.context_tags, old.keyword_trigger, old.action_taken, old.result, old.correction_rule, old.category, old.summary);
-            END
-        """)
-        conn.execute("""
-            CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory_logs BEGIN
-                INSERT INTO memory_fts(memory_fts, rowid, context_tags, keyword_trigger, action_taken, result, correction_rule, category, summary)
-                VALUES ('delete', old.id, old.context_tags, old.keyword_trigger, old.action_taken, old.result, old.correction_rule, old.category, old.summary);
-                INSERT INTO memory_fts(rowid, context_tags, keyword_trigger, action_taken, result, correction_rule, category, summary)
-                VALUES (new.id, new.context_tags, new.keyword_trigger, new.action_taken, new.result, new.correction_rule, new.category, new.summary);
-            END
-        """)
-
+    apply_schema(conn)
     conn.commit()
     conn.close()
 
