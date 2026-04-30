@@ -1,8 +1,5 @@
 """Schema single source of truth tests."""
 import sqlite3
-import tempfile
-from pathlib import Path
-import pytest
 
 
 def _column_set(conn: sqlite3.Connection, table: str) -> set[str]:
