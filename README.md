@@ -5,20 +5,6 @@
 **Upstream:** https://github.com/bobpullie/TEMS
 
 ---
-
-## 5-Asset 4 원칙 (Independence + Local-Only + Separate-Repo + Universal Portability)
-
-본 자산은 Triad Chord Studio 5-Asset 체계 (**TEMS / SDC / DVC / TWK / handover**) 의 한 축. 다음 4 게이트 원칙을 모두 만족해야 canonical GitHub 레포에 push 허용:
-
-1. **Independence** — 5자산 상호 의존 0. 본 자산은 다른 4 자산이 미설치돼도 self-contained 작동.
-2. **Local-Only** — 모든 에이전트 자산 (룰 / DB / QMD / 핸드오버 / 위키) 은 에이전트 로컬 프로젝트 폴더 내부에만. hub 디렉토리 (예: `E:/AgentInterface/`) 금지. (TEMS Python 패키지 자체는 site-packages 에 들어가지만 에이전트 룰/DB 등 자산은 모두 프로젝트 로컬.)
-3. **Separate-Repo** — 각 자산 별도 canonical 레포 보유. 한 PR 에 두 레포 묶지 않음.
-4. **Universal Portability** — Windows/Linux/macOS, 임의 OS user, 임의 에이전트명 (한국어/영어 무관) 작동. 절대경로/특정 user-name/hub 의존 금지 — env var · marker walk · `Path(__file__)` · `importlib.resources` 만 허용.
-
-위반 발견 시 즉시 일반화 PR. 미충족 = canonical push 보류.
-
----
-
 ## TL;DR
 
 TEMS 는 다음 세 가지를 한꺼번에 해결하는 경량 SQLite 기반 프레임워크다.
