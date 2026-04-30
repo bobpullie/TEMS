@@ -62,3 +62,41 @@ def test_adaptive_trigger_record_miss_works(tmp_path):
     )
     stats = trig.get_miss_stats()
     assert stats["total_misses"] == 1
+
+
+def test_apply_schema_idempotent(tmp_path):
+    """apply_schema must be safely callable repeatedly."""
+    from tems.schema import apply_schema, SCHEMA_VERSION
+
+    db_path = tmp_path / "idem.db"
+    for _ in range(3):
+        with sqlite3.connect(str(db_path)) as conn:
+            apply_schema(conn)
+            conn.commit()
+            ver = conn.execute("PRAGMA user_version").fetchone()[0]
+            assert ver == SCHEMA_VERSION
+
+
+def test_apply_schema_upgrades_legacy_db(tmp_path):
+    """A pre-SOT DB missing fire_count etc. should gain them via _add_missing_columns."""
+    from tems.schema import apply_schema
+
+    db_path = tmp_path / "legacy.db"
+    # Simulate pre-SOT schema: rule_health without fire_count
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("""
+            CREATE TABLE rule_health (
+                rule_id INTEGER PRIMARY KEY,
+                activation_count INTEGER DEFAULT 0
+            )
+        """)
+        conn.commit()
+
+    with sqlite3.connect(str(db_path)) as conn:
+        apply_schema(conn)
+        conn.commit()
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(rule_health)").fetchall()}
+
+    assert "fire_count" in cols
+    assert "compliance_count" in cols
+    assert "last_fired" in cols
