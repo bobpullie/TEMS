@@ -37,8 +37,54 @@ from tems.fts5_memory import MemoryDB
 DB_PATH = None  # 외부에서 주입
 QMD_RULES_DIR = None  # 외부에서 주입
 
-# Windows에서 npm 글로벌 바이너리는 .cmd wrapper가 필요
-QMD_CMD = "qmd.cmd" if sys.platform == "win32" else "qmd"
+
+def _resolve_qmd_cmd() -> Optional[str]:
+    """Universal Portability 해상 — env var > PATH > None.
+
+    Why: 5-Asset code review High #3 — 종전 ``QMD_CMD = "qmd.cmd" if win32 else
+    "qmd"`` 는 PATH 단일 의존이라, qmd 가 비표준 위치에 install 된 환경 또는
+    PATH 미주입 환경에서 silent FileNotFoundError. 4 원칙 중 Universal
+    Portability 위반.
+
+    해상 순서:
+    1. ``TEMS_QMD_CMD`` env var — 사용자 명시 path/이름
+    2. ``shutil.which`` — PATH 내 ``qmd.cmd`` (win32) / ``qmd`` (POSIX)
+    3. None — qmd 미설치 환경 (sync 자동 skip + 진단 1회 emit)
+    """
+    env = os.environ.get("TEMS_QMD_CMD")
+    if env:
+        return env
+    name = "qmd.cmd" if sys.platform == "win32" else "qmd"
+    return shutil.which(name)
+
+
+# Import-time 1회 해상 (process lifetime cache)
+QMD_CMD: Optional[str] = _resolve_qmd_cmd()
+
+# qmd 미설치 환경에서 sync 호출 시 진단 row 가 무한 누적되지 않도록 dedupe.
+_QMD_NOT_FOUND_LOGGED = False
+
+
+def _log_qmd_not_found(qmd_rules_dir: Path) -> None:
+    """sync 호출 시 qmd CLI 미발견 — audit_diagnostics_recent 호환 진단 1회 emit.
+
+    경로/형식은 ``audit_diagnostics_recent._log_diagnostic`` + ``preflight_hook``
+    helper 와 동일 (``memory/tems_diagnostics.jsonl`` JSONL append).
+    """
+    try:
+        agent_root = qmd_rules_dir.parent.parent  # memory/qmd_rules → memory → AGENT_ROOT
+        log_path = agent_root / "memory" / "tems_diagnostics.jsonl"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "timestamp": datetime.now().isoformat(),
+                "event": "qmd_command_not_found_failure",
+                "exc_type": "FileNotFoundError",
+                "exc_msg": "qmd CLI not found via TEMS_QMD_CMD env var or PATH; sync_rules_to_qmd skipped index update",
+                "traceback": "",
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 # ═══════════════════════════════════════════════════════════
@@ -885,14 +931,20 @@ def sync_rules_to_qmd(db: MemoryDB, qmd_rules_dir: Path) -> int:
         except (ValueError, IndexError):
             pass
 
-    # QMD 인덱스 갱신
-    try:
-        subprocess.run(
-            [QMD_CMD, "update"],
-            capture_output=True, timeout=10,
-        )
-    except Exception:
-        pass
+    # QMD 인덱스 갱신 — qmd 미설치 환경에서는 1회 진단 후 skip
+    if QMD_CMD is None:
+        global _QMD_NOT_FOUND_LOGGED
+        if not _QMD_NOT_FOUND_LOGGED:
+            _log_qmd_not_found(qmd_rules_dir)
+            _QMD_NOT_FOUND_LOGGED = True
+    else:
+        try:
+            subprocess.run(
+                [QMD_CMD, "update"],
+                capture_output=True, timeout=10,
+            )
+        except Exception:
+            pass
 
     return len(rules)
 
