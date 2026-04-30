@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 from datetime import datetime
 
-MEMORY_DIR = Path(__file__).parent
+MEMORY_DIR = Path(__file__).resolve().parent  # v0.4: cwd 비의존
 sys.path.insert(0, str(MEMORY_DIR.parent))
 
 # Rate limit — Stop hook은 매 응답 끝마다 발동되므로 N초 간격으로만 실행

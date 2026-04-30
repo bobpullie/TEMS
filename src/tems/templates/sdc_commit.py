@@ -25,7 +25,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-MEMORY_DIR = Path(__file__).parent
+MEMORY_DIR = Path(__file__).resolve().parent  # v0.4: cwd 비의존
 ACTIVE_GUARDS_PATH = MEMORY_DIR / "active_guards.json"
 SDC_LOG_PATH = MEMORY_DIR / "sdc_briefs.jsonl"
 

@@ -30,7 +30,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-MEMORY_DIR = Path(__file__).parent
+MEMORY_DIR = Path(__file__).resolve().parent  # v0.4: cwd 비의존
 DB_PATH = MEMORY_DIR / "error_logs.db"
 ACTIVE_GUARDS_PATH = MEMORY_DIR / "active_guards.json"
 DIAG_PATH = MEMORY_DIR / "tems_diagnostics.jsonl"

@@ -27,7 +27,7 @@ def find_agent_root(start: Path) -> Path:
 
 
 # 에이전트 자기 식별
-AGENT_ROOT = find_agent_root(Path(__file__).parent)
+AGENT_ROOT = find_agent_root(Path(__file__).resolve().parent)  # v0.4: cwd 비의존
 AGENT_ID = (AGENT_ROOT / ".claude" / "tems_agent_id").read_text(encoding="utf-8").strip()
 DB_PATH = AGENT_ROOT / "memory" / "error_logs.db"
 import os
