@@ -16,7 +16,6 @@ Evolution 4: Temporal Graph — Graphiti 기반 시간축 지식 그래프
 
 import json
 import subprocess
-import sqlite3
 import shutil
 import sys
 import os
