@@ -175,24 +175,61 @@ def apply_decay(dry_run: bool = False) -> dict:
     return summary
 
 
-def compute_ths(fire_count: int, compliance_count: int, violation_count: int) -> float:
-    """fire_count + compliance/violation 비율로 ths_score 산출.
+# S60 compliance reform — active 인용 신호와 passive 미위반 신호의 가중치
+THS_ACTIVE_WEIGHT = 1.0       # LLM 이 응답에 명시 인용 = 강한 적중 신호
+THS_PASSIVE_WEIGHT = 0.3      # 위반 시그니처 미발동 = 약한 적중 신호
+PASSIVE_ONLY_CEILING = 0.70   # active=0 + violation=0 인 룰의 utility 점근 상한
+PASSIVE_RAMP_HALF = 5         # 점근의 half-life — passive=5 일 때 ramp=0.5
 
-    공식:
-        utility    = compliance / (compliance + violation)        # 신호 없으면 0.5
-        confidence = min(1.0, fire_count / THS_FIRE_FULL_CONFIDENCE)
-        ths        = 0.5 + (utility - 0.5) * confidence            # [0, 1] clamp
 
-    의미:
-      - fire_count 0 → confidence 0 → ths = 0.5 (default 유지, 신호 없음)
-      - compliance 우세 + 자주 발화 → ths ↑ (preflight 우선)
-      - violation 우세 + 자주 발화 → ths ↓ (조용히 가라앉음 — 운영자가 룰 본문 점검 신호)
+def compute_ths(
+    fire_count: int,
+    compliance_count: int,
+    violation_count: int,
+    active_compliance_count: int = 0,
+) -> float:
+    """fire_count + (active 인용 / passive 미위반 / violation) 비율로 ths_score 산출.
+
+    공식 (S60):
+      active > 0:
+        weighted_c = active * 1.0 + passive * 0.3
+        utility    = weighted_c / (weighted_c + violation)            # 1.0 도달 가능
+      active == 0, violation == 0:
+        # passive-only — 도구 미사용으로 발생하는 유령 신호. 점근 ceiling 적용.
+        ramp    = passive / (passive + 5)                             # 0..1
+        utility = 0.5 + (0.7 - 0.5) * ramp                            # 0.5..0.7
+      active == 0, violation > 0:
+        weighted_c = passive * 0.3
+        utility    = weighted_c / (weighted_c + violation)            # passive 작으면 0 근접
+
+      confidence = min(1.0, fire_count / 10)
+      ths        = 0.5 + (utility - 0.5) * confidence                 # [0, 1] clamp
+
+    핵심 변화 (vs S58 공식):
+      - passive 만 누적된 룰은 utility ≤ 0.7 → ths ≤ 0.7 → 게이트 (0.7) 미통과 시 차단
+      - active 인용이 누적되면 utility 1.0 도달 가능 → ths 1.0 도달
+      - 결과: 유령 적중 룰 자연 차단, 진짜 적중 룰 우선 부상
+
+    backward-compat: active_compliance_count 미지정 시 0 (기존 호출자 안전).
     """
-    cv_total = (compliance_count or 0) + (violation_count or 0)
-    if cv_total <= 0:
-        utility = THS_NEUTRAL
+    active = max(0, active_compliance_count or 0)
+    passive = max(0, compliance_count or 0)
+    violation = max(0, violation_count or 0)
+
+    if active > 0:
+        weighted_c = active * THS_ACTIVE_WEIGHT + passive * THS_PASSIVE_WEIGHT
+        cv_total = weighted_c + violation
+        utility = weighted_c / cv_total if cv_total > 0 else THS_NEUTRAL
+    elif violation > 0:
+        weighted_c = passive * THS_PASSIVE_WEIGHT
+        utility = weighted_c / (weighted_c + violation)
+    elif passive > 0:
+        # passive-only, no violation — 점근 ceiling
+        ramp = passive / (passive + PASSIVE_RAMP_HALF)
+        utility = THS_NEUTRAL + (PASSIVE_ONLY_CEILING - THS_NEUTRAL) * ramp
     else:
-        utility = (compliance_count or 0) / cv_total
+        # 신호 없음
+        utility = THS_NEUTRAL
 
     fc = max(0, fire_count or 0)
     confidence = min(1.0, fc / THS_FIRE_FULL_CONFIDENCE)
@@ -222,9 +259,10 @@ def recompute_ths_scores(dry_run: bool = False) -> dict:
             conn.close()
             return {"ok": False, "error": f"rule_health missing columns: {missing}"}
 
-        # fire_count / compliance_count / violation_count 부재 시 0 으로 보정
+        # fire_count / compliance_count / violation_count / active_compliance_count
+        # 부재 시 0 으로 보정 (구 스키마 호환)
         select_fields = ["rule_id", "ths_score"]
-        for opt in ("fire_count", "compliance_count", "violation_count"):
+        for opt in ("fire_count", "compliance_count", "violation_count", "active_compliance_count"):
             select_fields.append(opt if opt in cols else f"0 AS {opt}")
         rows = conn.execute(f"SELECT {', '.join(select_fields)} FROM rule_health").fetchall()
     except Exception as e:
@@ -239,6 +277,7 @@ def recompute_ths_scores(dry_run: bool = False) -> dict:
             int(r["fire_count"] or 0),
             int(r["compliance_count"] or 0),
             int(r["violation_count"] or 0),
+            int(r["active_compliance_count"] or 0),
         )
         if abs(new - old) < 1e-6:
             histogram["unchanged"] += 1
@@ -249,6 +288,7 @@ def recompute_ths_scores(dry_run: bool = False) -> dict:
             "from": round(old, 4),
             "to": round(new, 4),
             "fire": int(r["fire_count"] or 0),
+            "active": int(r["active_compliance_count"] or 0),
             "compliance": int(r["compliance_count"] or 0),
             "violation": int(r["violation_count"] or 0),
         })
@@ -278,6 +318,86 @@ def recompute_ths_scores(dry_run: bool = False) -> dict:
     }
 
 
+## S60 --penalize-uncited 임계값
+PENALIZE_UNCITED_FIRE_THRESHOLD = 10  # fire_count 가 이 값 이상이면서 active=0 → 페널티 대상
+
+
+def penalize_uncited(dry_run: bool = False) -> dict:
+    """fire_count 누적이 큰데 active_compliance_count = 0 인 룰의 ths 를
+    0.5 (neutral) 로 강제 회귀.
+
+    의도: passive compliance 만 누적되어 ths 가 1.0 근처로 부풀려진 유령 적중
+    룰을 정기적으로 정리. compliance_tracker Tier 1 + ths active 가중치가
+    이미 1차/2차 방어이지만, 이미 누적된 룰 한정으로 안전망 역할.
+
+    실행 권장: 1-2주마다 cron 으로 --recompute-ths 직후 1회 실행.
+    """
+    if not DB_PATH.exists():
+        return {"ok": False, "error": f"DB not found: {DB_PATH}"}
+
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(rule_health)").fetchall()}
+        if "active_compliance_count" not in cols:
+            conn.close()
+            return {"ok": False, "error": "active_compliance_count column missing — run schema migration"}
+
+        rows = conn.execute("""
+            SELECT rule_id, ths_score, fire_count, compliance_count, violation_count,
+                   active_compliance_count, status
+            FROM rule_health
+            WHERE COALESCE(status, 'warm') != 'archive'
+        """).fetchall()
+    except Exception as e:
+        _log_diagnostic("penalize_uncited_query_failure", e)
+        return {"ok": False, "error": f"DB query failed: {e}"}
+
+    penalties = []
+    for r in rows:
+        fire = int(r["fire_count"] or 0)
+        active = int(r["active_compliance_count"] or 0)
+        violation = int(r["violation_count"] or 0)
+        ths = float(r["ths_score"] if r["ths_score"] is not None else THS_NEUTRAL)
+        # 페널티 조건: 자주 발화 + LLM 인용 0 + ths 가 neutral 위
+        if (
+            fire >= PENALIZE_UNCITED_FIRE_THRESHOLD
+            and active == 0
+            and violation == 0
+            and ths > THS_NEUTRAL + 1e-6
+        ):
+            penalties.append({
+                "rule_id": r["rule_id"],
+                "from_ths": round(ths, 4),
+                "to_ths": THS_NEUTRAL,
+                "fire": fire,
+                "passive_c": int(r["compliance_count"] or 0),
+            })
+
+    if not dry_run and penalties:
+        try:
+            for p in penalties:
+                conn.execute(
+                    "UPDATE rule_health SET ths_score = ? WHERE rule_id = ?",
+                    (p["to_ths"], p["rule_id"]),
+                )
+            conn.commit()
+        except Exception as e:
+            _log_diagnostic("penalize_uncited_update_failure", e)
+            conn.close()
+            return {"ok": False, "error": f"update failed: {e}", "penalties": penalties}
+
+    conn.close()
+
+    return {
+        "ok": True,
+        "dry_run": dry_run,
+        "total_rules": len(rows),
+        "penalized": len(penalties),
+        "details": penalties,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="TEMS Rule Decay — cold/archive 자동 전환 + ths_score 재계산")
     parser.add_argument("--dry-run", action="store_true", help="변경 없이 시뮬레이션만")
@@ -287,7 +407,29 @@ def main():
         action="store_true",
         help="status decay 대신 ths_score 재계산 실행 (preflight 관련성 게이트 보조)",
     )
+    parser.add_argument(
+        "--penalize-uncited",
+        action="store_true",
+        help="fire_count >= 10 + active_compliance == 0 + ths > 0.5 룰의 ths 를 0.5 로 강제 회귀 (S60 안전망)",
+    )
     args = parser.parse_args()
+
+    if args.penalize_uncited:
+        result = penalize_uncited(dry_run=args.dry_run)
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            sys.exit(0 if result.get("ok") else 1)
+        if not result.get("ok"):
+            print(f"[penalize] FAILED: {result.get('error')}", file=sys.stderr)
+            sys.exit(1)
+        mode = "DRY-RUN" if result["dry_run"] else "APPLIED"
+        print(f"[penalize-uncited] {mode}: total={result['total_rules']}, penalized={result['penalized']}")
+        for p in result["details"][:30]:
+            print(f"  #{p['rule_id']}: ths {p['from_ths']:.3f} → {p['to_ths']:.3f} "
+                  f"(fire={p['fire']}, passive_c={p['passive_c']}, active=0)")
+        if len(result["details"]) > 30:
+            print(f"  ... ({len(result['details']) - 30} more)")
+        return
 
     if args.recompute_ths:
         result = recompute_ths_scores(dry_run=args.dry_run)
@@ -303,7 +445,8 @@ def main():
               f"(raised+{h['raised']}, lowered+{h['lowered']}, unchanged={h['unchanged']})")
         for u in result["details"][:20]:
             print(f"  #{u['rule_id']}: {u['from']:.3f} → {u['to']:.3f} "
-                  f"(fire={u['fire']}, c={u['compliance']}, v={u['violation']})")
+                  f"(fire={u['fire']}, active={u.get('active', 0)}, "
+                  f"c={u['compliance']}, v={u['violation']})")
         if len(result["details"]) > 20:
             print(f"  ... ({len(result['details']) - 20} more)")
         return
