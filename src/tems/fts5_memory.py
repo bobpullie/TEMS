@@ -117,13 +117,16 @@ class MemoryDB:
             return cursor.lastrowid
 
     def search(self, query: str, limit: int = 10) -> list[dict]:
+        # S56-B: valid_until/superseded_by 컬럼 노출 — 호출자 (preflight) 가 superseded
+        # 룰을 retrieval 단계에서 필터할 수 있도록 함. search 자체는 raw 결과 유지 (필터 X).
         with self._conn() as conn:
             rows = conn.execute(
                 """
                 SELECT
                     m.id, m.timestamp, m.context_tags, m.keyword_trigger,
                     m.action_taken, m.result, m.correction_rule,
-                    m.summary, m.category, m.severity, rank
+                    m.summary, m.category, m.severity,
+                    m.valid_from, m.valid_until, m.superseded_by, rank
                 FROM memory_fts f
                 JOIN memory_logs m ON f.rowid = m.id
                 WHERE memory_fts MATCH ?
@@ -185,7 +188,10 @@ class MemoryDB:
             return [dict(r) for r in rows]
 
     def preflight(self, query: str, limit: int = 5) -> dict:
-        results = self.search(query, limit=limit * 3)
+        # S56-B: superseded 룰 (valid_until IS NOT NULL) 은 retrieval 단계에서 제외.
+        # 옛/새 룰이 동시에 주입되어 LLM 컨텍스트에 모순된 지시가 노출되던 회귀 차단.
+        results = [r for r in self.search(query, limit=limit * 3)
+                   if r.get("valid_until") is None]
         return {
             "tcl_hits": [r for r in results if r["category"] == "TCL"],
             "tgl_hits": [r for r in results if r["category"] == "TGL"],

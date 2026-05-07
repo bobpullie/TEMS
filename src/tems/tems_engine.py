@@ -184,8 +184,14 @@ class HybridRetriever:
         return fused
 
     def preflight(self, query: str, limit: int = 5) -> dict:
-        """하이브리드 preflight — TCL/TGL 분류 포함"""
-        results = self.search(query, limit=limit * 3, mode="auto")
+        """하이브리드 preflight — TCL/TGL 분류 포함
+
+        S56-B: superseded 룰 (valid_until IS NOT NULL) 은 retrieval 단계에서 제외.
+        sparse path 는 MemoryDB.search 가 valid_until 컬럼을 노출하므로 그대로 필터.
+        dense path 는 _load_rule_by_id 가 컬럼 포함하도록 보강 (아래).
+        """
+        results = [r for r in self.search(query, limit=limit * 3, mode="auto")
+                   if r.get("valid_until") is None]
         return {
             "tcl_hits": [r for r in results if r.get("category") == "TCL"],
             "tgl_hits": [r for r in results if r.get("category") == "TGL"],
