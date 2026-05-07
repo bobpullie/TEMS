@@ -53,6 +53,10 @@ _BASE_TABLES = {
             ths_score REAL DEFAULT 0.5,
             ths_updated_at TEXT DEFAULT (datetime('now')),
             abstraction_level TEXT,
+            -- S60 compliance reform
+            active_compliance_count INTEGER DEFAULT 0,
+            last_active_compliance_at TEXT,
+            relevance_skipped_count INTEGER DEFAULT 0,
             FOREIGN KEY (rule_id) REFERENCES memory_logs(id)
         )
     """,
@@ -245,6 +249,10 @@ def _apply_schema_v1(conn: sqlite3.Connection) -> None:
         ("classification", "TEXT", "NULL"),
         ("needs_review", "INTEGER", "0"),
         ("abstraction_level", "TEXT", "NULL"),
+        # S60 compliance reform — active citation channel + scope gate monitoring
+        ("active_compliance_count", "INTEGER", "0"),
+        ("last_active_compliance_at", "TEXT", "NULL"),
+        ("relevance_skipped_count", "INTEGER", "0"),
     ])
     _add_missing_columns(conn, "rule_edges", [
         ("valid_from", "TEXT", "NULL"),

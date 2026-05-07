@@ -126,10 +126,15 @@ def save_guards(data: dict) -> None:
 
 
 def update_counts(rule_id: int, field: str) -> None:
-    """rule_health.<field>_count++ (field = 'compliance' | 'violation')."""
-    if field not in ("compliance", "violation"):
+    """rule_health.<field>_count++ (field = 'compliance' | 'violation' | 'relevance_skipped').
+
+    S60: 'relevance_skipped' 추가 — Tier 1 scope gate 가 측정을 스킵한 횟수.
+    이 카운터는 ths 공식에 영향 안 주고 모니터링 용도.
+    """
+    valid = ("compliance", "violation", "relevance_skipped")
+    if field not in valid:
         return
-    col = f"{field}_count"
+    col = f"{field}_count" if field != "relevance_skipped" else "relevance_skipped_count"
     try:
         conn = sqlite3.connect(str(DB_PATH))
         conn.execute(f"""
@@ -140,6 +145,9 @@ def update_counts(rule_id: int, field: str) -> None:
         """, (rule_id,))
         conn.commit()
         conn.close()
+    except sqlite3.OperationalError as e:
+        # 구 스키마 (relevance_skipped_count 컬럼 부재) — 그냥 silent
+        _log_diagnostic("compliance_update_counts_schema_missing", e)
     except Exception as e:
         _log_diagnostic("compliance_update_counts_failure", e)
 
@@ -348,6 +356,16 @@ def main():
             violations_reported.append({"rule_id": rid, "reason": reason})
             g["had_violation"] = True
 
+        # S60 Tier 1 scope gate — tool_pattern 보유 가드의 "관련 도구 매칭" 추적.
+        # tool_pattern 만 있는 가드 (실제 가장 정확한 가드) 가 윈도우 동안 단 한 번도
+        # 자기 도구를 못 보면 compliance 측정은 무의미 — relevance_skipped 로 분리.
+        if g.get("tool_pattern"):
+            try:
+                if re.search(g["tool_pattern"], target, re.IGNORECASE):
+                    g["saw_relevant_tool"] = True
+            except re.error:
+                pass
+
         if not is_scope_tick:
             # 관찰형: guard 보존, window 건드리지 않음
             surviving_guards.append(g)
@@ -355,8 +373,18 @@ def main():
 
         remaining = int(g.get("remaining_checks", 0)) - 1
         if remaining <= 0:
-            # window 만료 — 위반 이력 없으면 compliance++ (scope-aware 틱 기준)
-            if not g.get("had_violation"):
+            # window 만료 — 분기:
+            #   (a) tool_pattern 보유 + 관련 도구 0회 → relevance_skipped (no c, no v)
+            #   (b) 그 외 + 위반 이력 없음           → passive compliance++
+            #   (c) 위반 이력                       → 카운트 안 함 (이미 violation 누적됨)
+            if g.get("tool_pattern") and not g.get("saw_relevant_tool"):
+                update_counts(rid, "relevance_skipped")
+                log_event(
+                    "relevance_skipped",
+                    rid,
+                    f"window closed but tool_pattern never matched ({g.get('tool_pattern','')[:60]})",
+                )
+            elif not g.get("had_violation"):
                 update_counts(rid, "compliance")
                 log_event("compliance", rid, f"window closed clean (scope ticks consumed)")
             continue
