@@ -11,7 +11,7 @@ from typing import Callable
 
 __all__ = ["SCHEMA_VERSION", "MIGRATIONS", "apply_schema"]
 
-SCHEMA_VERSION = 1  # bump when adding a migration step
+SCHEMA_VERSION = 2  # bump when adding a migration step
 
 # ─── Base tables (version 1) ────────────────────────────────────────────────
 
@@ -262,8 +262,23 @@ def _apply_schema_v1(conn: sqlite3.Connection) -> None:
         conn.execute(ddl)
 
 
+def _apply_schema_v2(conn: sqlite3.Connection) -> None:
+    """v2 — S60 compliance reform: active citation channel + scope gate counters.
+
+    구 DB (v1 도달) 가 v2 로 올라올 때 새 컬럼 3종을 추가한다. v1 신규 생성 DB
+    는 _apply_schema_v1 의 _add_missing_columns 에 이미 동일 항목이 적힘 —
+    중복 호출이지만 try/except 가 'duplicate column' 을 흡수.
+    """
+    _add_missing_columns(conn, "rule_health", [
+        ("active_compliance_count", "INTEGER", "0"),
+        ("last_active_compliance_at", "TEXT", "NULL"),
+        ("relevance_skipped_count", "INTEGER", "0"),
+    ])
+
+
 MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _apply_schema_v1,  # index 0 = migrate to v1
+    _apply_schema_v2,  # index 1 = migrate to v2 (S60 compliance reform columns)
 ]
 
 
