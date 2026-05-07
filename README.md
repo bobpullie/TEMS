@@ -321,7 +321,7 @@ src/tems/
 ```python
 keywords = ["useEffect", "deps", "currentPrice", "interval", "재생성"]
 fts_query = '"useEffect"* OR "deps"* OR "currentPrice"* OR ...'
-→ TGL #54 매칭 (final_score=0.73, THRESHOLD=0.55)
+→ TGL #54 매칭 (final_score=0.73, THRESHOLD=0.7)
 ```
 
 ### Step 3 — 컨텍스트 주입
@@ -390,7 +390,7 @@ TEMS 는 규칙 강제력을 4층으로 분리해 적용한다. 강할수록 구
 매 prompt 무차별 주입은 "banner blindness" 를 일으켜 모든 규칙이 무시된다. TEMS 는 다음 임계값 gate 를 적용한다 (실제 운영 에이전트 값 참고):
 
 ```python
-SCORE_THRESHOLD = 0.55   # final_score < 이 값이면 주입 안 함
+SCORE_THRESHOLD = 0.7    # final_score < 이 값이면 주입 안 함
 MAX_TCL = 2              # TCL 최대 주입 수
 MAX_TGL = 2              # TGL 최대 주입 수
 
@@ -401,6 +401,26 @@ final_score = 0.6 * BM25_rank_score + 0.4 * THS_score
 - `THS_score` — 규칙 효용도 (0~1, `rule_health.ths_score`)
 
 결과: 매 turn 평균 2~4개 규칙만 주입, 무관한 규칙은 침묵.
+
+### THS_score 활성화 (필수 운영 절차)
+
+`compliance_tracker` 가 `rule_health.ths_score` 를 `INSERT` 시 0.5 로 초기화 후
+갱신하지 않는다 — 그대로 두면 모든 룰이 default 0.5 에 묶여 `THS_WEIGHT(0.4)` 가
+차별화 신호를 잃고 BM25 단일 신호가 ranking 을 결정한다. 결과: generic-keyword
+noise 룰이 specific-keyword 적중 룰을 이긴다.
+
+따라서 주기적으로 ths_score 를 재계산해야 한다 (decay 와 함께 cron 권장):
+
+```bash
+python memory/decay.py --recompute-ths              # 적용
+python memory/decay.py --recompute-ths --dry-run    # 시뮬레이션
+```
+
+공식: `ths = 0.5 + (utility - 0.5) * confidence`
+- `utility = compliance / (compliance + violation)` (신호 없으면 0.5)
+- `confidence = min(1.0, fire_count / 10)`
+
+자주 발화 + 잘 지켜지는 룰 → ths ↑. 자주 발화 + 위반 우세 → ths ↓ (룰 본문 점검 신호).
 
 ---
 

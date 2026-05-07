@@ -160,6 +160,7 @@ MAX_CASCADE = 1  # CASCADE 최대 주입 수
 MAX_PREDICT = 1  # 예측 최대 주입 수
 BM25_WEIGHT = 0.6
 THS_WEIGHT = 0.4
+SCORE_THRESHOLD = 0.7  # final_score < 이 값이면 주입 차단 (관련성 게이트)
 
 
 def get_rule_health() -> dict[int, dict]:
@@ -242,6 +243,10 @@ def rank_by_ths(hits: list[dict], health_map) -> list[dict]:
         scored.append(hit)
 
     scored.sort(key=lambda x: x["_final_score"], reverse=True)
+    # 관련성 게이트: final_score < SCORE_THRESHOLD 인 hit 은 무관 룰로 간주하여 차단.
+    # README 가 명시한 게이트가 코드에 누락되어 있어 무관 룰이 MAX_TCL/MAX_TGL 슬롯을
+    # 점유하던 현상 (S60 발견) 을 차단한다.
+    scored = [h for h in scored if h["_final_score"] >= SCORE_THRESHOLD]
     return scored
 
 
