@@ -35,6 +35,10 @@ DIAG_PATH = MEMORY_DIR / "tems_diagnostics.jsonl"
 COLD_DAYS = 30
 ARCHIVE_DAYS = 90
 
+# THS recomputation (관련성 게이트 보조 — preflight final_score 의 0.4 가중치)
+THS_FIRE_FULL_CONFIDENCE = 10  # fire_count 가 이 값에 도달하면 confidence=1.0
+THS_NEUTRAL = 0.5              # 신호 없음 시 default
+
 
 def _log_diagnostic(event: str, exc: Exception) -> None:
     import traceback
@@ -171,11 +175,138 @@ def apply_decay(dry_run: bool = False) -> dict:
     return summary
 
 
+def compute_ths(fire_count: int, compliance_count: int, violation_count: int) -> float:
+    """fire_count + compliance/violation 비율로 ths_score 산출.
+
+    공식:
+        utility    = compliance / (compliance + violation)        # 신호 없으면 0.5
+        confidence = min(1.0, fire_count / THS_FIRE_FULL_CONFIDENCE)
+        ths        = 0.5 + (utility - 0.5) * confidence            # [0, 1] clamp
+
+    의미:
+      - fire_count 0 → confidence 0 → ths = 0.5 (default 유지, 신호 없음)
+      - compliance 우세 + 자주 발화 → ths ↑ (preflight 우선)
+      - violation 우세 + 자주 발화 → ths ↓ (조용히 가라앉음 — 운영자가 룰 본문 점검 신호)
+    """
+    cv_total = (compliance_count or 0) + (violation_count or 0)
+    if cv_total <= 0:
+        utility = THS_NEUTRAL
+    else:
+        utility = (compliance_count or 0) / cv_total
+
+    fc = max(0, fire_count or 0)
+    confidence = min(1.0, fc / THS_FIRE_FULL_CONFIDENCE)
+
+    ths = THS_NEUTRAL + (utility - THS_NEUTRAL) * confidence
+    return max(0.0, min(1.0, ths))
+
+
+def recompute_ths_scores(dry_run: bool = False) -> dict:
+    """rule_health.ths_score 를 fire_count + compliance/violation 비율로 재계산.
+
+    compliance_tracker 가 INSERT 시 0.5 로 초기화 후 갱신하지 않아 모든 룰이
+    default 0.5 에 묶여있던 문제 (S60 발견) 를 해소한다. 결과적으로 preflight
+    의 THS_WEIGHT(0.4) 가 차별화 신호를 갖게 되어 generic-keyword noise 룰이
+    specific-keyword 적중 룰을 BM25 단일 신호로 이기던 현상을 막는다.
+    """
+    if not DB_PATH.exists():
+        return {"ok": False, "error": f"DB not found: {DB_PATH}"}
+
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(rule_health)").fetchall()}
+        required = {"rule_id", "ths_score"}
+        missing = required - cols
+        if missing:
+            conn.close()
+            return {"ok": False, "error": f"rule_health missing columns: {missing}"}
+
+        # fire_count / compliance_count / violation_count 부재 시 0 으로 보정
+        select_fields = ["rule_id", "ths_score"]
+        for opt in ("fire_count", "compliance_count", "violation_count"):
+            select_fields.append(opt if opt in cols else f"0 AS {opt}")
+        rows = conn.execute(f"SELECT {', '.join(select_fields)} FROM rule_health").fetchall()
+    except Exception as e:
+        _log_diagnostic("ths_recompute_query_failure", e)
+        return {"ok": False, "error": f"DB query failed: {e}"}
+
+    updates = []
+    histogram = {"unchanged": 0, "raised": 0, "lowered": 0}
+    for r in rows:
+        old = float(r["ths_score"] if r["ths_score"] is not None else THS_NEUTRAL)
+        new = compute_ths(
+            int(r["fire_count"] or 0),
+            int(r["compliance_count"] or 0),
+            int(r["violation_count"] or 0),
+        )
+        if abs(new - old) < 1e-6:
+            histogram["unchanged"] += 1
+            continue
+        histogram["raised" if new > old else "lowered"] += 1
+        updates.append({
+            "rule_id": r["rule_id"],
+            "from": round(old, 4),
+            "to": round(new, 4),
+            "fire": int(r["fire_count"] or 0),
+            "compliance": int(r["compliance_count"] or 0),
+            "violation": int(r["violation_count"] or 0),
+        })
+
+    if not dry_run and updates:
+        try:
+            for u in updates:
+                conn.execute(
+                    "UPDATE rule_health SET ths_score = ? WHERE rule_id = ?",
+                    (u["to"], u["rule_id"]),
+                )
+            conn.commit()
+        except Exception as e:
+            _log_diagnostic("ths_recompute_update_failure", e)
+            conn.close()
+            return {"ok": False, "error": f"update failed: {e}", "updates": updates}
+
+    conn.close()
+
+    return {
+        "ok": True,
+        "dry_run": dry_run,
+        "total_rules": len(rows),
+        "changed": len(updates),
+        "histogram": histogram,
+        "details": updates,
+    }
+
+
 def main():
-    parser = argparse.ArgumentParser(description="TEMS Rule Decay — cold/archive 자동 전환")
+    parser = argparse.ArgumentParser(description="TEMS Rule Decay — cold/archive 자동 전환 + ths_score 재계산")
     parser.add_argument("--dry-run", action="store_true", help="변경 없이 시뮬레이션만")
     parser.add_argument("--json", action="store_true", help="결과 JSON 출력")
+    parser.add_argument(
+        "--recompute-ths",
+        action="store_true",
+        help="status decay 대신 ths_score 재계산 실행 (preflight 관련성 게이트 보조)",
+    )
     args = parser.parse_args()
+
+    if args.recompute_ths:
+        result = recompute_ths_scores(dry_run=args.dry_run)
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            sys.exit(0 if result.get("ok") else 1)
+        if not result.get("ok"):
+            print(f"[ths] FAILED: {result.get('error')}", file=sys.stderr)
+            sys.exit(1)
+        mode = "DRY-RUN" if result["dry_run"] else "APPLIED"
+        h = result["histogram"]
+        print(f"[ths] {mode}: total={result['total_rules']}, changed={result['changed']} "
+              f"(raised+{h['raised']}, lowered+{h['lowered']}, unchanged={h['unchanged']})")
+        for u in result["details"][:20]:
+            print(f"  #{u['rule_id']}: {u['from']:.3f} → {u['to']:.3f} "
+                  f"(fire={u['fire']}, c={u['compliance']}, v={u['violation']})")
+        if len(result["details"]) > 20:
+            print(f"  ... ({len(result['details']) - 20} more)")
+        return
 
     result = apply_decay(dry_run=args.dry_run)
 
